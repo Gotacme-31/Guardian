@@ -1,0 +1,21 @@
+{
+  "name": "guardian",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Local dependency usage scanner for Node.js and TypeScript projects",
+  "packageManager": "pnpm@10.28.1",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "guardian": "tsx apps/cli/src/index.ts",
+    "test": "pnpm --recursive test",
+    "typecheck": "pnpm --recursive typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^24.2.1",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

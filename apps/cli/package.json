@@ -1,0 +1,13 @@
+{
+  "name": "@guardian/cli",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --project tsconfig.json"
+  },
+  "dependencies": {
+    "@guardian/project-scanner": "workspace:*"
+  }
+}
