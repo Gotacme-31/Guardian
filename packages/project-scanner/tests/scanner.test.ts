@@ -43,6 +43,19 @@ function usageFor(dependencyUsage: DependencyUsage[], dependency: string): Depen
   return usage as DependencyUsage;
 }
 
+async function scanTemporaryDependency(
+  dependency: string,
+  source: string,
+  file = "src/index.ts",
+): Promise<DependencyUsage> {
+  const projectPath = await createTemporaryProject({
+    packageJson: { dependencies: { [dependency]: "^1.0.0" } },
+    files: { [file]: source },
+  });
+  const result = await scanProject(projectPath);
+  return usageFor(result.dependencyUsage, dependency);
+}
+
 afterEach(async () => {
   await Promise.all(temporaryProjects.splice(0).map((projectPath) =>
     rm(projectPath, { recursive: true, force: true })));
@@ -293,5 +306,426 @@ describe("dependency usage", () => {
     expect(usageFor(result.dependencyUsage, "zod").files).toEqual([
       "src/nested/schema.ts",
     ]);
+  });
+});
+
+describe("symbol usage", () => {
+  it("detects a member call on a default import", async () => {
+    const axios = await scanTemporaryDependency(
+      "axios",
+      "import axios from 'axios';\naxios.get('/users');",
+    );
+
+    expect(axios.symbolUsages).toEqual([{
+      dependency: "axios",
+      file: "src/index.ts",
+      localBinding: "axios",
+      usagePath: "axios.get",
+      kind: "call",
+      line: 2,
+      column: 1,
+    }]);
+  });
+
+  it("detects multiple methods on a default import", async () => {
+    const axios = await scanTemporaryDependency(
+      "axios",
+      [
+        "import axios from 'axios';",
+        "axios.get('/users');",
+        "axios.post('/orders');",
+        "axios.create();",
+      ].join("\n"),
+    );
+
+    expect(axios.symbolUsages.map(({ usagePath }) => usagePath)).toEqual([
+      "axios.get",
+      "axios.post",
+      "axios.create",
+    ]);
+    expect(axios.symbolUsages.every(({ kind }) => kind === "call")).toBe(true);
+  });
+
+  it("detects a direct call to a named import", async () => {
+    const dateFns = await scanTemporaryDependency(
+      "date-fns",
+      "import { format } from 'date-fns';\nformat(new Date(), 'yyyy-MM-dd');",
+    );
+
+    expect(dateFns.symbolUsages).toContainEqual(expect.objectContaining({
+      importedSymbol: "format",
+      localBinding: "format",
+      usagePath: "format",
+      kind: "call",
+    }));
+  });
+
+  it("detects a member call on a named import", async () => {
+    const zod = await scanTemporaryDependency(
+      "zod",
+      "import { z } from 'zod';\nz.string();",
+    );
+
+    expect(zod.symbolUsages).toContainEqual(expect.objectContaining({
+      importedSymbol: "z",
+      localBinding: "z",
+      usagePath: "z.string",
+      kind: "call",
+    }));
+  });
+
+  it("preserves imported and local identities for an aliased named import", async () => {
+    const dateFns = await scanTemporaryDependency(
+      "date-fns",
+      "import { format as formatDate } from 'date-fns';\nformatDate(new Date(), 'yyyy');",
+    );
+
+    expect(dateFns.symbolUsages).toContainEqual(expect.objectContaining({
+      importedSymbol: "format",
+      localBinding: "formatDate",
+      usagePath: "format",
+      kind: "call",
+    }));
+  });
+
+  it("detects member calls on a namespace import", async () => {
+    const react = await scanTemporaryDependency(
+      "react",
+      "import * as React from 'react';\nReact.createElement('div');",
+      "src/view.tsx",
+    );
+
+    expect(react.symbolUsages).toContainEqual(expect.objectContaining({
+      localBinding: "React",
+      usagePath: "React.createElement",
+      kind: "call",
+    }));
+  });
+
+  it("detects a require default-like binding", async () => {
+    const express = await scanTemporaryDependency(
+      "express",
+      "const express = require('express');\nexpress.json();",
+      "src/server.cjs",
+    );
+
+    expect(express.symbolUsages).toContainEqual(expect.objectContaining({
+      localBinding: "express",
+      usagePath: "express.json",
+      kind: "call",
+    }));
+  });
+
+  it("detects a direct call from a destructured require", async () => {
+    const express = await scanTemporaryDependency(
+      "express",
+      "const { Router } = require('express');\nRouter();",
+      "src/server.cjs",
+    );
+
+    expect(express.symbolUsages).toContainEqual(expect.objectContaining({
+      importedSymbol: "Router",
+      localBinding: "Router",
+      usagePath: "Router",
+      kind: "call",
+    }));
+  });
+
+  it("detects a member call on a dynamic import binding", async () => {
+    const dynamicUsage = await scanTemporaryDependency(
+      "some-package",
+      "const module = await import('some-package');\nmodule.doSomething();",
+    );
+
+    expect(dynamicUsage.symbolUsages).toContainEqual(expect.objectContaining({
+      localBinding: "module",
+      usagePath: "module.doSomething",
+      kind: "call",
+    }));
+  });
+
+  it("records the complete chained member access", async () => {
+    const axios = await scanTemporaryDependency(
+      "axios",
+      "import axios from 'axios';\nconst headers = axios.defaults.headers.common;",
+    );
+
+    expect(axios.symbolUsages).toEqual([expect.objectContaining({
+      usagePath: "axios.defaults.headers.common",
+      kind: "member-access",
+    })]);
+  });
+
+  it("records the source file relative to the project", async () => {
+    const zod = await scanTemporaryDependency(
+      "zod",
+      "import { z } from 'zod';\nz.object({});",
+      "src/nested/schema.ts",
+    );
+
+    expect(zod.symbolUsages[0]?.file).toBe("src/nested/schema.ts");
+  });
+
+  it("records one-based source lines", async () => {
+    const axios = await scanTemporaryDependency(
+      "axios",
+      "import axios from 'axios';\n\n\naxios.get('/users');",
+    );
+
+    expect(axios.symbolUsages[0]?.line).toBe(4);
+  });
+
+  it("records one-based source columns", async () => {
+    const axios = await scanTemporaryDependency(
+      "axios",
+      "import axios from 'axios';\n    axios.get('/users');",
+    );
+
+    expect(axios.symbolUsages[0]?.column).toBe(5);
+  });
+
+  it("emits one terminal usage for a member call", async () => {
+    const axios = await scanTemporaryDependency(
+      "axios",
+      "import axios from 'axios';\naxios.get('/users');",
+    );
+
+    expect(axios.symbolUsages).toHaveLength(1);
+    expect(axios.symbolUsages.map(({ usagePath, kind }) => [usagePath, kind])).toEqual([
+      ["axios.get", "call"],
+    ]);
+  });
+
+  it("does not attribute a shadowing function parameter to an import", async () => {
+    const axios = await scanTemporaryDependency(
+      "axios",
+      [
+        "import axios from 'axios';",
+        "axios.post('/orders');",
+        "function test(axios: { get(): void }) {",
+        "  axios.get();",
+        "}",
+      ].join("\n"),
+    );
+
+    expect(axios.symbolUsages.map(({ usagePath }) => usagePath)).toEqual(["axios.post"]);
+  });
+
+  it("does not attribute a shadowing local variable to an import", async () => {
+    const zod = await scanTemporaryDependency(
+      "zod",
+      [
+        "import { z } from 'zod';",
+        "z.string();",
+        "function run(localThing: { execute(): void }) {",
+        "  const z = localThing;",
+        "  z.execute();",
+        "}",
+      ].join("\n"),
+    );
+
+    expect(zod.symbolUsages.map(({ usagePath }) => usagePath)).toEqual(["z.string"]);
+  });
+
+  it("keeps same-named imports associated with their dependencies", async () => {
+    const projectPath = await createTemporaryProject({
+      packageJson: { dependencies: { "package-a": "^1.0.0", "package-b": "^1.0.0" } },
+      files: {
+        "src/index.ts": [
+          "import { foo } from 'package-a';",
+          "import { foo as otherFoo } from 'package-b';",
+          "foo();",
+          "otherFoo();",
+        ].join("\n"),
+      },
+    });
+    const result = await scanProject(projectPath);
+
+    expect(usageFor(result.dependencyUsage, "package-a").symbolUsages)
+      .toContainEqual(expect.objectContaining({ localBinding: "foo", usagePath: "foo" }));
+    expect(usageFor(result.dependencyUsage, "package-b").symbolUsages)
+      .toContainEqual(expect.objectContaining({ localBinding: "otherFoo", usagePath: "foo" }));
+  });
+
+  it("classifies construction of an imported class", async () => {
+    const prisma = await scanTemporaryDependency(
+      "@prisma/client",
+      "import { PrismaClient } from '@prisma/client';\nnew PrismaClient();",
+    );
+
+    expect(prisma.symbolUsages).toContainEqual(expect.objectContaining({
+      importedSymbol: "PrismaClient",
+      localBinding: "PrismaClient",
+      usagePath: "PrismaClient",
+      kind: "constructor",
+    }));
+  });
+
+  it("tracks a simple instance created from an imported class", async () => {
+    const sdk = await scanTemporaryDependency(
+      "some-sdk",
+      [
+        "import { SomeClient } from 'some-sdk';",
+        "const client = new SomeClient();",
+        "client.connect();",
+      ].join("\n"),
+    );
+
+    expect(sdk.symbolUsages).toContainEqual(expect.objectContaining({
+      importedSymbol: "SomeClient",
+      localBinding: "client",
+      usagePath: "client.connect",
+      kind: "call",
+    }));
+  });
+
+  it("tracks a member chain on a simple imported-class instance", async () => {
+    const prisma = await scanTemporaryDependency(
+      "@prisma/client",
+      [
+        "import { PrismaClient } from '@prisma/client';",
+        "const prisma = new PrismaClient();",
+        "prisma.user.findMany();",
+      ].join("\n"),
+    );
+
+    expect(prisma.symbolUsages).toContainEqual(expect.objectContaining({
+      importedSymbol: "PrismaClient",
+      localBinding: "prisma",
+      usagePath: "prisma.user.findMany",
+      kind: "call",
+    }));
+  });
+
+  it("tracks multiple simple instances of one imported class", async () => {
+    const sdk = await scanTemporaryDependency(
+      "some-sdk",
+      [
+        "import { SomeClient } from 'some-sdk';",
+        "const first = new SomeClient();",
+        "const second = new SomeClient();",
+        "first.users.list();",
+        "second.orders.list();",
+      ].join("\n"),
+    );
+
+    expect(sdk.symbolUsages.filter(({ localBinding }) => localBinding === "first"))
+      .toContainEqual(expect.objectContaining({ usagePath: "first.users.list" }));
+    expect(sdk.symbolUsages.filter(({ localBinding }) => localBinding === "second"))
+      .toContainEqual(expect.objectContaining({ usagePath: "second.orders.list" }));
+  });
+
+  it("does not emit symbol usages for an unused import", async () => {
+    const axios = await scanTemporaryDependency("axios", "import axios from 'axios';");
+
+    expect(axios.symbolUsages).toEqual([]);
+  });
+
+  it("records symbol usages in different source files", async () => {
+    const projectPath = await createTemporaryProject({
+      packageJson: { dependencies: { axios: "^1.0.0" } },
+      files: {
+        "src/users.ts": "import axios from 'axios';\naxios.get('/users');",
+        "src/orders.ts": "import axios from 'axios';\naxios.post('/orders');",
+      },
+    });
+    const result = await scanProject(projectPath);
+
+    expect(usageFor(result.dependencyUsage, "axios").symbolUsages.map(({ file }) => file).sort())
+      .toEqual(["src/orders.ts", "src/users.ts"]);
+  });
+
+  it("continues to ignore relative imports when analyzing symbols", async () => {
+    const projectPath = await createTemporaryProject({
+      packageJson: { dependencies: { axios: "^1.0.0" } },
+      files: {
+        "src/index.ts": "import { helper } from './helper.js';\nhelper.run();",
+        "src/helper.ts": "export const helper = { run() {} };",
+      },
+    });
+    const result = await scanProject(projectPath);
+
+    expect(result.dependencyUsage).toEqual([]);
+  });
+
+  it("stops attributing calls after a direct binding reassignment", async () => {
+    const axios = await scanTemporaryDependency(
+      "axios",
+      [
+        "let client = require('axios');",
+        "client.get('/users');",
+        "client = { post() {} };",
+        "client.post('/orders');",
+      ].join("\n"),
+    );
+
+    expect(axios.symbolUsages.map(({ usagePath }) => usagePath)).toEqual(["client.get"]);
+  });
+
+  it("classifies a bare imported binding as a reference", async () => {
+    const axios = await scanTemporaryDependency(
+      "axios",
+      "import axios from 'axios';\nexport const client = axios;",
+    );
+
+    expect(axios.symbolUsages).toContainEqual(expect.objectContaining({
+      localBinding: "axios",
+      usagePath: "axios",
+      kind: "reference",
+    }));
+  });
+
+  it("does not treat a shadowed require function as a dependency import", async () => {
+    const projectPath = await createTemporaryProject({
+      packageJson: { dependencies: { axios: "^1.0.0" } },
+      files: {
+        "src/index.ts": [
+          "function load(require: (name: string) => unknown) {",
+          "  const client = require('axios');",
+          "  return client;",
+          "}",
+        ].join("\n"),
+      },
+    });
+    const result = await scanProject(projectPath);
+
+    expect(result.dependencyUsage).toEqual([]);
+  });
+
+  it("does not attribute Promise methods from an unawaited dynamic import", async () => {
+    const dynamicUsage = await scanTemporaryDependency(
+      "some-package",
+      "const modulePromise = import('some-package');\nmodulePromise.then(() => undefined);",
+    );
+
+    expect(dynamicUsage.symbolUsages).toEqual([]);
+  });
+
+  it("does not attribute runtime binding references before initialization", async () => {
+    const axios = await scanTemporaryDependency(
+      "axios",
+      "client.get('/users');\nvar client = require('axios');",
+      "src/index.js",
+    );
+
+    expect(axios.symbolUsages).toEqual([]);
+  });
+
+  it("avoids attribution when repeated declarations share one compiler symbol", async () => {
+    const projectPath = await createTemporaryProject({
+      packageJson: { dependencies: { "package-a": "^1.0.0", "package-b": "^1.0.0" } },
+      files: {
+        "src/index.js": [
+          "var client = require('package-a');",
+          "client.first();",
+          "var client = require('package-b');",
+          "client.second();",
+        ].join("\n"),
+      },
+    });
+    const result = await scanProject(projectPath);
+
+    expect(usageFor(result.dependencyUsage, "package-a").symbolUsages).toEqual([]);
+    expect(usageFor(result.dependencyUsage, "package-b").symbolUsages).toEqual([]);
   });
 });

@@ -24,20 +24,36 @@ function formatUsage(usage: DependencyUsage): string[] {
   const lines = [
     usage.dependency,
     `  ${usage.files.length} ${pluralize(usage.files.length, "file")}`,
-    `  ${usage.importCount} ${pluralize(usage.importCount, "import")}`,
+    "  imports:",
+    `    ${usage.importCount} ${pluralize(usage.importCount, "import")}`,
   ];
   const defaultImports = unique(usage.imports.map((item) => item.defaultImport));
   const namespaceImports = unique(usage.imports.map((item) => item.namespaceImport));
   const symbols = unique(usage.imports.flatMap((item) => item.importedSymbols));
 
   if (defaultImports.length > 0) {
-    lines.push(`  default: ${defaultImports.join(", ")}`);
+    lines.push(`    default: ${defaultImports.join(", ")}`);
   }
   if (namespaceImports.length > 0) {
-    lines.push(`  namespace: ${namespaceImports.join(", ")}`);
+    lines.push(`    namespace: ${namespaceImports.join(", ")}`);
   }
   if (symbols.length > 0) {
-    lines.push(`  symbols: ${symbols.join(", ")}`);
+    lines.push(`    symbols: ${symbols.join(", ")}`);
+  }
+
+  lines.push("  usages:");
+  if (usage.symbolUsages.length === 0) {
+    lines.push("    none");
+  } else {
+    const labels = usage.symbolUsages.map((item) =>
+      item.kind === "constructor" ? `new ${item.usagePath}` : item.usagePath);
+    const labelWidth = Math.max(...labels.map((label) => label.length));
+    for (const [index, symbolUsage] of usage.symbolUsages.entries()) {
+      const label = labels[index] ?? symbolUsage.usagePath;
+      lines.push(
+        `    ${label.padEnd(labelWidth)}  ${symbolUsage.file}:${symbolUsage.line}:${symbolUsage.column}`,
+      );
+    }
   }
 
   return lines;

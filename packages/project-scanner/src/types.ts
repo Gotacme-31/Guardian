@@ -19,11 +19,25 @@ export interface ImportUsage {
   kind: ImportKind;
 }
 
+export type SymbolUsageKind = "call" | "member-access" | "constructor" | "reference";
+
+export interface SymbolUsage {
+  dependency: string;
+  file: string;
+  importedSymbol?: string;
+  localBinding: string;
+  usagePath: string;
+  kind: SymbolUsageKind;
+  line: number;
+  column: number;
+}
+
 export interface DependencyUsage {
   dependency: string;
   files: string[];
   importCount: number;
   imports: ImportUsage[];
+  symbolUsages: SymbolUsage[];
 }
 
 export interface ProjectScanResult {

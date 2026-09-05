@@ -8,4 +8,6 @@ export type {
   ImportUsage,
   PackageManager,
   ProjectScanResult,
+  SymbolUsage,
+  SymbolUsageKind,
 } from "./types.js";

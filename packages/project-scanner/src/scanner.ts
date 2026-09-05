@@ -6,10 +6,15 @@ import {
   Project,
   SyntaxKind,
   type CallExpression,
+  type Identifier,
   type SourceFile,
 } from "ts-morph";
 
 import { ProjectScanError } from "./errors.js";
+import {
+  analyzeSymbolUsages,
+  type ImportedSymbolBinding,
+} from "./symbol-usage.js";
 import type {
   DependencyInfo,
   DependencyType,
@@ -17,6 +22,7 @@ import type {
   ImportUsage,
   PackageManager,
   ProjectScanResult,
+  SymbolUsage,
 } from "./types.js";
 
 const SOURCE_EXTENSIONS = new Set([
@@ -60,6 +66,17 @@ interface PackageManifest {
 interface MutableDependencyUsage {
   files: Set<string>;
   imports: ImportUsage[];
+  symbolUsages: SymbolUsage[];
+}
+
+interface FoundImport {
+  dependency: string;
+  usage: ImportUsage;
+}
+
+interface SourceFileAnalysis {
+  imports: FoundImport[];
+  symbolUsages: SymbolUsage[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -244,9 +261,27 @@ function stringArgument(callExpression: CallExpression): string | undefined {
   return undefined;
 }
 
+function isUnshadowedRequire(expression: Node): expression is Identifier {
+  if (!Node.isIdentifier(expression) || expression.getText() !== "require") {
+    return false;
+  }
+
+  const symbol = expression.getSymbol();
+  return symbol === undefined
+    || symbol.getDeclarations().every((declaration) => declaration.getSourceFile().isDeclarationFile());
+}
+
+function bindingPropertyName(node: Node): string {
+  if (Node.isStringLiteral(node) || Node.isNumericLiteral(node)) {
+    return node.getLiteralText();
+  }
+  return node.getText();
+}
+
 function variableBindingForCall(callExpression: CallExpression): {
   importedSymbols: string[];
   localName?: string;
+  bindings: Array<Omit<ImportedSymbolBinding, "dependency">>;
 } {
   let current: Node = callExpression;
   const parent = current.getParent();
@@ -256,26 +291,54 @@ function variableBindingForCall(callExpression: CallExpression): {
 
   const declaration = current.getParent();
   if (declaration === undefined || !Node.isVariableDeclaration(declaration)) {
-    return { importedSymbols: [] };
+    return { importedSymbols: [], bindings: [] };
   }
 
   const nameNode = declaration.getNameNode();
   if (Node.isIdentifier(nameNode)) {
-    return { importedSymbols: [], localName: nameNode.getText() };
-  }
-  if (Node.isObjectBindingPattern(nameNode)) {
+    const localName = nameNode.getText();
     return {
-      importedSymbols: nameNode.getElements().map((element) => element.getPropertyNameNode()?.getText() ?? element.getName()),
+      importedSymbols: [],
+      localName,
+      bindings: [{
+        localBinding: localName,
+        usageBase: localName,
+        declaration: nameNode,
+        validFrom: current.getEnd(),
+      }],
     };
   }
-  return { importedSymbols: [] };
+  if (Node.isObjectBindingPattern(nameNode)) {
+    const bindings: Array<Omit<ImportedSymbolBinding, "dependency">> = [];
+    const importedSymbols: string[] = [];
+    for (const element of nameNode.getElements()) {
+      const localNameNode = element.getNameNode();
+      if (!Node.isIdentifier(localNameNode)) {
+        continue;
+      }
+      const importedSymbol = element.getPropertyNameNode() === undefined
+        ? localNameNode.getText()
+        : bindingPropertyName(element.getPropertyNameNodeOrThrow());
+      importedSymbols.push(importedSymbol);
+      bindings.push({
+        importedSymbol,
+        localBinding: localNameNode.getText(),
+        usageBase: importedSymbol,
+        declaration: localNameNode,
+        validFrom: current.getEnd(),
+      });
+    }
+    return {
+      importedSymbols,
+      bindings,
+    };
+  }
+  return { importedSymbols: [], bindings: [] };
 }
 
-function analyzeSourceFile(projectPath: string, sourceFile: SourceFile): Array<{
-  dependency: string;
-  usage: ImportUsage;
-}> {
-  const found: Array<{ dependency: string; usage: ImportUsage }> = [];
+function analyzeSourceFile(projectPath: string, sourceFile: SourceFile): SourceFileAnalysis {
+  const imports: FoundImport[] = [];
+  const bindings: ImportedSymbolBinding[] = [];
   const file = relativeFilePath(projectPath, sourceFile.getFilePath());
 
   for (const declaration of sourceFile.getImportDeclarations()) {
@@ -287,7 +350,7 @@ function analyzeSourceFile(projectPath: string, sourceFile: SourceFile): Array<{
 
     const defaultImport = declaration.getDefaultImport()?.getText();
     const namespaceImport = declaration.getNamespaceImport()?.getText();
-    found.push({
+    imports.push({
       dependency,
       usage: {
         file,
@@ -298,11 +361,46 @@ function analyzeSourceFile(projectPath: string, sourceFile: SourceFile): Array<{
         kind: "es-import",
       },
     });
+
+    const defaultImportNode = declaration.getDefaultImport();
+    if (defaultImportNode !== undefined) {
+      bindings.push({
+        dependency,
+        localBinding: defaultImportNode.getText(),
+        usageBase: defaultImportNode.getText(),
+        declaration: defaultImportNode,
+      });
+    }
+
+    const namespaceImportNode = declaration.getNamespaceImport();
+    if (namespaceImportNode !== undefined) {
+      bindings.push({
+        dependency,
+        localBinding: namespaceImportNode.getText(),
+        usageBase: namespaceImportNode.getText(),
+        declaration: namespaceImportNode,
+      });
+    }
+
+    for (const namedImport of declaration.getNamedImports()) {
+      const importedSymbol = namedImport.getName();
+      const localNameNode = namedImport.getAliasNode() ?? namedImport.getNameNode();
+      if (!Node.isIdentifier(localNameNode)) {
+        continue;
+      }
+      bindings.push({
+        dependency,
+        importedSymbol,
+        localBinding: localNameNode.getText(),
+        usageBase: importedSymbol,
+        declaration: localNameNode,
+      });
+    }
   }
 
   for (const callExpression of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const expression = callExpression.getExpression();
-    const isRequire = Node.isIdentifier(expression) && expression.getText() === "require";
+    const isRequire = isUnshadowedRequire(expression);
     const isDynamicImport = expression.getKind() === SyntaxKind.ImportKeyword;
     if (!isRequire && !isDynamicImport) {
       continue;
@@ -315,7 +413,7 @@ function analyzeSourceFile(projectPath: string, sourceFile: SourceFile): Array<{
     }
 
     const binding = variableBindingForCall(callExpression);
-    found.push({
+    imports.push({
       dependency,
       usage: {
         file,
@@ -326,9 +424,17 @@ function analyzeSourceFile(projectPath: string, sourceFile: SourceFile): Array<{
         kind: isRequire ? "require" : "dynamic-import",
       },
     });
+    const isAwaitedDynamicImport = isDynamicImport
+      && Node.isAwaitExpression(callExpression.getParent());
+    if (isRequire || isAwaitedDynamicImport) {
+      bindings.push(...binding.bindings.map((item) => ({ dependency, ...item })));
+    }
   }
 
-  return found;
+  return {
+    imports,
+    symbolUsages: analyzeSymbolUsages(sourceFile, file, bindings),
+  };
 }
 
 function buildDependencyUsage(
@@ -345,17 +451,33 @@ function buildDependencyUsage(
   const usageByDependency = new Map<string, MutableDependencyUsage>();
   for (const sourceFile of project.getSourceFiles().sort((left, right) =>
     left.getFilePath().localeCompare(right.getFilePath()))) {
-    for (const item of analyzeSourceFile(projectPath, sourceFile)) {
+    const analysis = analyzeSourceFile(projectPath, sourceFile);
+    for (const item of analysis.imports) {
       if (!declaredDependencies.has(item.dependency)) {
         continue;
       }
       const existing = usageByDependency.get(item.dependency) ?? {
         files: new Set<string>(),
         imports: [],
+        symbolUsages: [],
       };
       existing.files.add(item.usage.file);
       existing.imports.push(item.usage);
       usageByDependency.set(item.dependency, existing);
+    }
+
+    for (const symbolUsage of analysis.symbolUsages) {
+      if (!declaredDependencies.has(symbolUsage.dependency)) {
+        continue;
+      }
+      const existing = usageByDependency.get(symbolUsage.dependency) ?? {
+        files: new Set<string>(),
+        imports: [],
+        symbolUsages: [],
+      };
+      existing.files.add(symbolUsage.file);
+      existing.symbolUsages.push(symbolUsage);
+      usageByDependency.set(symbolUsage.dependency, existing);
     }
   }
 
@@ -365,6 +487,7 @@ function buildDependencyUsage(
       files: [...usage.files].sort(),
       importCount: usage.imports.length,
       imports: usage.imports,
+      symbolUsages: usage.symbolUsages,
     }))
     .sort((left, right) => left.dependency.localeCompare(right.dependency));
 }

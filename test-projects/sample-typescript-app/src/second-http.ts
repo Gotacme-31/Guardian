@@ -1,3 +1,3 @@
 import axios from "axios";
 
-export const secondClient = axios;
+export const secondClient = axios.create();

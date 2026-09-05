@@ -1,3 +1,3 @@
 const lazyModule = await import("some-package");
 
-export { lazyModule };
+export const lazyResult = lazyModule.doSomething();
