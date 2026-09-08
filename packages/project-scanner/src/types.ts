@@ -1,3 +1,5 @@
+import type { InstalledDependencyResolution } from "./dependency-resolution/types.js";
+
 export type PackageManager = "pnpm" | "npm" | "yarn" | "unknown";
 
 export type DependencyType = "dependency" | "devDependency";
@@ -51,4 +53,5 @@ export interface ProjectScanResult {
   dependencies: DependencyInfo[];
   devDependencies: DependencyInfo[];
   dependencyUsage: DependencyUsage[];
+  dependencyResolutions: InstalledDependencyResolution[];
 }

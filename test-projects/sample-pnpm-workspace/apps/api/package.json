@@ -1,0 +1,12 @@
+{
+  "name": "@guardian/api",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@guardian/shared": "workspace:*",
+    "axios": "^1.7.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0"
+  }
+}

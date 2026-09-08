@@ -4,7 +4,7 @@ Guardian is a local tool for understanding how software projects depend on exter
 
 > Guardian is currently an experimental prototype.
 
-## M1.1 Project Scanner
+## M2 Project Scanner
 
 Guardian scans a Node.js or TypeScript project without modifying or executing it. It reports:
 
@@ -16,17 +16,23 @@ Guardian scans a Node.js or TypeScript project without modifying or executing it
 - package root matching for regular, scoped, and subpath imports;
 - calls, member access, constructors, and direct references to imported bindings;
 - source file, line, and column for each symbol usage;
-- member usage on simple instances created with `new ImportedClass()`.
+- member usage on simple instances created with `new ImportedClass()`;
+- exact direct dependency resolutions from pnpm lockfile v9 importers;
+- registry, workspace, link, file, Git, and URL resolution kinds;
+- unresolved and unsupported resolution states without inspecting `node_modules`.
 
-M1.1 does not resolve installed versions, contact registries, compare package releases or APIs, execute target code, generate changes, use AI, or integrate with GitHub.
+M2 does not contact registries, compare package releases or APIs, execute target code, generate changes, use AI, or integrate with GitHub.
 
 ## Architecture
 
 ```text
 apps/cli                         argument handling and text output
 packages/project-scanner         read-only project inspection and public contracts
+  src/dependency-resolution      normalized resolution and pnpm lockfile adapter
 test-projects/sample-typescript-app
-                                 deterministic scanner fixture
+                                  deterministic scanner fixture
+test-projects/sample-pnpm-workspace
+                                  pnpm workspace/importer fixture
 ```
 
 The CLI contains no source-analysis logic. The scanner exposes:
@@ -77,6 +83,11 @@ Dependencies
   7 direct
   2 development
 
+axios
+  declared  ^1.7.0
+  resolved  1.7.9
+  source    registry
+
 Usage
 
 axios
@@ -98,7 +109,7 @@ axios
 pnpm test
 ```
 
-The tests cover M1 project detection and imports plus direct symbol calls, aliases, namespaces, CommonJS, dynamic imports, member chains, source locations, shadowing, reassignment, and simple constructor instances.
+The tests cover M1/M1.1 scanning and symbol analysis plus pnpm registry and protocol resolutions, peer suffixes, workspace discovery, exact importer selection, typed lockfile errors, unsupported managers, and read-only behavior.
 
 ## Typecheck
 
@@ -112,11 +123,16 @@ All workspace TypeScript uses strict mode.
 
 Scanning is read-only. Guardian does not install dependencies in the target, execute scripts or source files, alter manifests or lockfiles, or write into the target project.
 
+The scanner uses the maintained `yaml` package only to parse existing pnpm lockfiles. It does not invoke pnpm internals, inspect `node_modules`, or perform network requests.
+
 If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exists at the project root, scanning fails with an explicit ambiguity error. Guardian never selects a package manager silently in that situation.
 
 ## Current Limitations
 
-- Dependency versions remain the raw ranges declared in `package.json`.
+- Installed dependency resolution currently supports pnpm lockfile v9 only; npm and Yarn return `unsupported` resolutions.
+- Only direct `dependencies` and `devDependencies` are resolved.
+- Registry aliases and pnpm references outside the documented v9 importer forms are left unresolved rather than inferred.
+- Workspace membership is confirmed by an exact lockfile importer; workspace package patterns are not interpreted separately.
 - Only static string module specifiers are recognized.
 - Imports are associated only when the package root is declared in `dependencies` or `devDependencies`.
 - TypeScript path mappings are not resolved; undeclared aliases are intentionally ignored.

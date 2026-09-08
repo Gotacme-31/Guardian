@@ -104,7 +104,12 @@ describe("environment detection", () => {
     ["package-lock.json", "npm"],
     ["yarn.lock", "yarn"],
   ] as const)("detects %s as %s", async (lockfile, expectedManager) => {
-    const projectPath = await createTemporaryProject({ files: { [lockfile]: "" } });
+    const lockfileContents = lockfile === "pnpm-lock.yaml"
+      ? "lockfileVersion: '9.0'\nimporters:\n  .: {}\n"
+      : "";
+    const projectPath = await createTemporaryProject({
+      files: { [lockfile]: lockfileContents },
+    });
 
     await expect(scanProject(projectPath)).resolves.toMatchObject({
       packageManager: expectedManager,

@@ -7,6 +7,7 @@ import {
   ProjectScanError,
   scanProject,
   type DependencyUsage,
+  type InstalledDependencyResolution,
   type ProjectScanResult,
 } from "@guardian/project-scanner";
 
@@ -59,6 +60,30 @@ function formatUsage(usage: DependencyUsage): string[] {
   return lines;
 }
 
+function formatResolution(resolution: InstalledDependencyResolution): string[] {
+  const lines = [
+    resolution.dependency,
+    `  declared  ${resolution.declaredVersion}`,
+  ];
+
+  if (resolution.resolvedVersion !== undefined) {
+    lines.push(`  resolved  ${resolution.resolvedVersion}`);
+  }
+  if (
+    resolution.resolvedReference !== undefined
+    && resolution.resolvedReference !== resolution.resolvedVersion
+  ) {
+    lines.push(`  reference ${resolution.resolvedReference}`);
+  }
+  lines.push(`  source    ${resolution.kind}`);
+  if (resolution.status !== "resolved") {
+    const issue = resolution.issue === undefined ? "" : ` (${resolution.issue})`;
+    lines.push(`  status    ${resolution.status}${issue}`);
+  }
+
+  return lines;
+}
+
 function formatResult(result: ProjectScanResult): string {
   const lines = [
     `Guardian v${VERSION}`,
@@ -74,9 +99,13 @@ function formatResult(result: ProjectScanResult): string {
     "Dependencies",
     `  ${result.dependencies.length} direct`,
     `  ${result.devDependencies.length} development`,
-    "",
-    "Usage",
   ];
+
+  for (const resolution of result.dependencyResolutions) {
+    lines.push("", ...formatResolution(resolution));
+  }
+
+  lines.push("", "Usage");
 
   if (result.dependencyUsage.length === 0) {
     lines.push("", "  No declared dependencies are imported.");

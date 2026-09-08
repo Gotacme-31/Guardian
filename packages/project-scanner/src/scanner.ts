@@ -12,6 +12,10 @@ import {
 
 import { ProjectScanError } from "./errors.js";
 import {
+  discoverPnpmWorkspace,
+  resolveInstalledDependencies,
+} from "./dependency-resolution/index.js";
+import {
   analyzeSymbolUsages,
   type ImportedSymbolBinding,
 } from "./symbol-usage.js";
@@ -59,6 +63,7 @@ const LOCKFILES: ReadonlyArray<{ file: string; manager: Exclude<PackageManager, 
 
 interface PackageManifest {
   name?: string;
+  declaredPackageManager?: string;
   dependencies: DependencyInfo[];
   devDependencies: DependencyInfo[];
 }
@@ -154,9 +159,18 @@ async function readPackageManifest(packageJsonPath: string): Promise<PackageMani
       "package.json field \"name\" must be a string when present.",
     );
   }
+  if (parsed.packageManager !== undefined && typeof parsed.packageManager !== "string") {
+    throw new ProjectScanError(
+      "PACKAGE_JSON_INVALID_STRUCTURE",
+      "package.json field \"packageManager\" must be a string when present.",
+    );
+  }
 
   return {
     ...(typeof parsed.name === "string" ? { name: parsed.name } : {}),
+    ...(typeof parsed.packageManager === "string"
+      ? { declaredPackageManager: parsed.packageManager }
+      : {}),
     dependencies: parseDependencies(parsed.dependencies, "dependencies", "dependency"),
     devDependencies: parseDependencies(parsed.devDependencies, "devDependencies", "devDependency"),
   };
@@ -175,7 +189,22 @@ async function pathExists(filePath: string): Promise<boolean> {
   }
 }
 
-async function detectPackageManager(projectPath: string): Promise<PackageManager> {
+function packageManagerFromDeclaration(declaration: string | undefined): PackageManager {
+  if (declaration === undefined) {
+    return "unknown";
+  }
+  for (const manager of ["pnpm", "npm", "yarn"] as const) {
+    if (declaration === manager || declaration.startsWith(`${manager}@`)) {
+      return manager;
+    }
+  }
+  return "unknown";
+}
+
+async function detectPackageManager(
+  projectPath: string,
+  declaredPackageManager: string | undefined,
+): Promise<PackageManager> {
   const detected: Array<{ file: string; manager: Exclude<PackageManager, "unknown"> }> = [];
 
   for (const lockfile of LOCKFILES) {
@@ -191,7 +220,13 @@ async function detectPackageManager(projectPath: string): Promise<PackageManager
     );
   }
 
-  return detected[0]?.manager ?? "unknown";
+  if (detected[0] !== undefined) {
+    return detected[0].manager;
+  }
+  if (await discoverPnpmWorkspace(projectPath) !== undefined) {
+    return "pnpm";
+  }
+  return packageManagerFromDeclaration(declaredPackageManager);
 }
 
 async function collectSourceFiles(directoryPath: string): Promise<string[]> {
@@ -525,12 +560,21 @@ export async function scanProject(projectPath: string): Promise<ProjectScanResul
   await validateProjectDirectory(absoluteProjectPath);
 
   const packageManifest = await readPackageManifest(path.join(absoluteProjectPath, "package.json"));
-  const packageManager = await detectPackageManager(absoluteProjectPath);
+  const packageManager = await detectPackageManager(
+    absoluteProjectPath,
+    packageManifest.declaredPackageManager,
+  );
   const sourceFilePaths = await collectSourceFiles(absoluteProjectPath);
-  const declaredDependencies = new Set([
-    ...packageManifest.dependencies.map(({ name }) => name),
-    ...packageManifest.devDependencies.map(({ name }) => name),
-  ]);
+  const dependencies = [
+    ...packageManifest.dependencies,
+    ...packageManifest.devDependencies,
+  ];
+  const declaredDependencies = new Set(dependencies.map(({ name }) => name));
+  const dependencyResolutions = await resolveInstalledDependencies({
+    projectPath: absoluteProjectPath,
+    packageManager,
+    dependencies,
+  });
 
   let dependencyUsage: DependencyUsage[];
   try {
@@ -560,5 +604,6 @@ export async function scanProject(projectPath: string): Promise<ProjectScanResul
     dependencies: packageManifest.dependencies,
     devDependencies: packageManifest.devDependencies,
     dependencyUsage,
+    dependencyResolutions,
   };
 }

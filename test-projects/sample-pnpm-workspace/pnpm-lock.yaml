@@ -1,0 +1,23 @@
+lockfileVersion: '9.0'
+
+importers:
+  .: {}
+
+  apps/api:
+    dependencies:
+      '@guardian/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      axios:
+        specifier: ^1.7.0
+        version: 1.7.9
+    devDependencies:
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.7(@types/node@24.13.3)
+
+  packages/shared:
+    dependencies:
+      zod:
+        specifier: ^4.0.0
+        version: 4.0.5
