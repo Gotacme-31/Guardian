@@ -4,7 +4,7 @@ Guardian is a local tool for understanding how software projects depend on exter
 
 > Guardian is currently an experimental prototype.
 
-## M3 Dependency Context
+## M4 Target Version Resolution
 
 Guardian scans a Node.js or TypeScript project without modifying or executing it. It reports:
 
@@ -21,9 +21,11 @@ Guardian scans a Node.js or TypeScript project without modifying or executing it
 - registry, workspace, link, file, Git, and URL resolution kinds;
 - unresolved and unsupported resolution states without inspecting `node_modules`;
 - deterministic dependency contexts correlating declarations, resolutions, imports, and usages;
-- local and safely normalized canonical API paths with their original occurrences.
+- local and safely normalized canonical API paths with their original occurrences;
+- npm target resolution for published versions, dist-tags, and SemVer ranges;
+- normalized upgrade direction between installed and target versions.
 
-M3 does not contact registries, compare package releases or APIs, execute target code, generate changes, use AI, or integrate with GitHub.
+Only the explicit `target` command contacts the public npm Registry. Guardian does not download packages, compare APIs, execute target code, generate changes, use AI, or integrate with GitHub.
 
 ## Architecture
 
@@ -32,6 +34,7 @@ apps/cli                         argument handling and text output
 packages/project-scanner         read-only project inspection and public contracts
   src/dependency-resolution      normalized resolution and pnpm lockfile adapter
   src/dependency-context         pure correlation over ProjectScanResult
+  src/target-resolution          npm metadata client and SemVer target resolver
 test-projects/sample-typescript-app
                                   deterministic scanner fixture
 test-projects/sample-pnpm-workspace
@@ -44,6 +47,7 @@ The CLI contains no source-analysis logic. The scanner exposes:
 scanProject(projectPath: string): Promise<ProjectScanResult>
 buildDependencyContexts(scan: ProjectScanResult): DependencyContext[]
 findDependencyContext(contexts: DependencyContext[], dependency: string)
+resolveDependencyTarget(context: DependencyContext, requestedTarget: string)
 ```
 
 Dependency contexts are derived in memory from a completed scan. Canonical API paths use
@@ -69,10 +73,16 @@ From the repository root:
 ```bash
 pnpm guardian scan ./test-projects/sample-typescript-app
 pnpm guardian inspect ./test-projects/sample-typescript-app axios
+pnpm guardian target ./test-projects/sample-typescript-app axios latest
 ```
 
 `inspect` performs one scan and prints the correlated declaration, resolution, imports, evidence,
 and API occurrences for the requested dependency.
+
+`target` sends only the encoded public package name to `registry.npmjs.org`, resolves an exact
+version from a dist-tag, exact version, or SemVer range, and reports the version change type,
+including prerelease-only transitions.
+`scan` and `inspect` remain offline.
 
 The equivalent filtered workspace command is:
 
@@ -123,7 +133,7 @@ axios
 pnpm test
 ```
 
-The tests cover M1/M1.1 scanning, M2 pnpm resolution, and M3 context correlation, canonical API paths, evidence, deterministic summaries, and the `inspect` CLI.
+The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, and offline M4 npm metadata, SemVer, cache, timeout, and network-error scenarios.
 
 ## Typecheck
 
@@ -137,7 +147,7 @@ All workspace TypeScript uses strict mode.
 
 Scanning is read-only. Guardian does not install dependencies in the target, execute scripts or source files, alter manifests or lockfiles, or write into the target project.
 
-The scanner uses the maintained `yaml` package only to parse existing pnpm lockfiles. It does not invoke pnpm internals, inspect `node_modules`, or perform network requests.
+The scanner uses the maintained `yaml` package only to parse existing pnpm lockfiles. It does not invoke pnpm internals or inspect `node_modules`. Target resolution uses native Node.js `fetch` with an eight-second timeout and a `Guardian/0.0.1` User-Agent.
 
 If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exists at the project root, scanning fails with an explicit ambiguity error. Guardian never selects a package manager silently in that situation.
 
@@ -158,3 +168,6 @@ If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exist
 - A direct reassignment stops subsequent attribution for that binding; Guardian does not attempt branch-sensitive data-flow.
 - Dynamic computed member names are not converted into usage paths.
 - Constructor-instance usages retain their observed local paths but do not receive an invented canonical API path.
+- Target resolution supports public npm registry dependencies only; private registries and authentication are not supported.
+- Workspace, link, file, Git, URL, and unknown resolution kinds return `unsupported` targets.
+- Target resolution does not download package contents or compare API surfaces.

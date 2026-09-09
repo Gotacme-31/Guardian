@@ -14,7 +14,11 @@
     "typecheck": "tsc --project tsconfig.json"
   },
   "dependencies": {
+    "semver": "^7.8.5",
     "ts-morph": "^27.0.0",
     "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/semver": "^7.8.0"
   }
 }

@@ -7,8 +7,10 @@ import {
   buildDependencyContexts,
   findDependencyContext,
   ProjectScanError,
+  resolveDependencyTarget,
   scanProject,
   type DependencyContext,
+  type DependencyTargetResolution,
   type DependencyUsage,
   type InstalledDependencyResolution,
   type ProjectScanResult,
@@ -213,11 +215,51 @@ function formatDependencyContext(context: DependencyContext): string {
   return lines.join("\n");
 }
 
+function formatTargetResolution(resolution: DependencyTargetResolution): string {
+  const lines = [
+    "Guardian Target Resolution",
+    "",
+    "Dependency",
+    `  ${resolution.dependency}`,
+    "",
+    "Installed",
+    `  ${resolution.installedVersion ?? "unknown"}`,
+    "",
+    "Requested",
+    `  ${resolution.requestedTarget}`,
+  ];
+
+  if (resolution.status === "resolved") {
+    lines.push(
+      "",
+      "Resolved",
+      `  ${resolution.resolvedVersion}`,
+      "",
+      "Upgrade",
+      `  ${resolution.upgradeType}`,
+    );
+    if (resolution.distTag !== undefined) {
+      lines.push("", "Dist-tag", `  ${resolution.distTag}`);
+    }
+  } else {
+    lines.push("", "Status", `  ${resolution.status}`);
+    if (resolution.issue !== undefined) {
+      lines.push("", "Issue", `  ${resolution.issue}`);
+    }
+    if (resolution.httpStatus !== undefined) {
+      lines.push("", "HTTP", `  ${resolution.httpStatus}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
 function printUsage(): void {
   console.error([
     "Usage:",
     "  pnpm guardian scan <project-path>",
     "  pnpm guardian inspect <project-path> <dependency>",
+    "  pnpm guardian target <project-path> <dependency> <target>",
   ].join("\n"));
 }
 
@@ -242,10 +284,20 @@ async function validateProjectPath(projectPath: string): Promise<string> {
 }
 
 async function main(args: string[]): Promise<void> {
-  const [command, projectPath, dependency, ...extraArguments] = args;
-  const isScan = command === "scan" && projectPath !== undefined && dependency === undefined;
-  const isInspect = command === "inspect" && projectPath !== undefined && dependency !== undefined;
-  if ((!isScan && !isInspect) || extraArguments.length > 0) {
+  const [command, projectPath, dependency, target, ...extraArguments] = args;
+  const isScan = command === "scan"
+    && projectPath !== undefined
+    && dependency === undefined
+    && target === undefined;
+  const isInspect = command === "inspect"
+    && projectPath !== undefined
+    && dependency !== undefined
+    && target === undefined;
+  const isTarget = command === "target"
+    && projectPath !== undefined
+    && dependency !== undefined
+    && target !== undefined;
+  if ((!isScan && !isInspect && !isTarget) || extraArguments.length > 0) {
     printUsage();
     process.exitCode = 1;
     return;
@@ -254,12 +306,20 @@ async function main(args: string[]): Promise<void> {
   try {
     const absolutePath = await validateProjectPath(projectPath);
     const result = await scanProject(absolutePath);
-    if (isInspect) {
+    if (isInspect || isTarget) {
       const context = findDependencyContext(buildDependencyContexts(result), dependency);
       if (context === undefined) {
         throw new Error(`Dependency "${dependency}" is not declared by this project.`);
       }
-      console.log(formatDependencyContext(context));
+      if (isTarget) {
+        const targetResolution = await resolveDependencyTarget(context, target);
+        console.log(formatTargetResolution(targetResolution));
+        if (targetResolution.status !== "resolved") {
+          process.exitCode = 1;
+        }
+      } else {
+        console.log(formatDependencyContext(context));
+      }
     } else {
       console.log(formatResult(result));
     }
