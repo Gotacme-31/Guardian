@@ -385,12 +385,20 @@ function analyzeSourceFile(projectPath: string, sourceFile: SourceFile): SourceF
 
     const defaultImport = declaration.getDefaultImport()?.getText();
     const namespaceImport = declaration.getNamespaceImport()?.getText();
+    const namedImports = declaration.getNamedImports();
+    const symbolBindings = namedImports.flatMap((namedImport) => {
+      const localNameNode = namedImport.getAliasNode() ?? namedImport.getNameNode();
+      return Node.isIdentifier(localNameNode)
+        ? [{ importedSymbol: namedImport.getName(), localBinding: localNameNode.getText() }]
+        : [];
+    });
     imports.push({
       dependency,
       usage: {
         file,
         source,
-        importedSymbols: declaration.getNamedImports().map((namedImport) => namedImport.getName()),
+        importedSymbols: namedImports.map((namedImport) => namedImport.getName()),
+        ...(symbolBindings.length === 0 ? {} : { symbolBindings }),
         ...(defaultImport === undefined ? {} : { defaultImport }),
         ...(namespaceImport === undefined ? {} : { namespaceImport }),
         kind: "es-import",
@@ -417,7 +425,7 @@ function analyzeSourceFile(projectPath: string, sourceFile: SourceFile): SourceF
       });
     }
 
-    for (const namedImport of declaration.getNamedImports()) {
+    for (const namedImport of namedImports) {
       const importedSymbol = namedImport.getName();
       const localNameNode = namedImport.getAliasNode() ?? namedImport.getNameNode();
       if (!Node.isIdentifier(localNameNode)) {
@@ -448,12 +456,17 @@ function analyzeSourceFile(projectPath: string, sourceFile: SourceFile): SourceF
     }
 
     const binding = variableBindingForCall(callExpression);
+    const symbolBindings = binding.bindings.flatMap((item) =>
+      item.importedSymbol === undefined
+        ? []
+        : [{ importedSymbol: item.importedSymbol, localBinding: item.localBinding }]);
     imports.push({
       dependency,
       usage: {
         file,
         source,
         importedSymbols: binding.importedSymbols,
+        ...(symbolBindings.length === 0 ? {} : { symbolBindings }),
         ...(binding.localName === undefined || isDynamicImport ? {} : { defaultImport: binding.localName }),
         ...(binding.localName === undefined || !isDynamicImport ? {} : { namespaceImport: binding.localName }),
         kind: isRequire ? "require" : "dynamic-import",

@@ -12,10 +12,16 @@ export interface DependencyInfo {
 
 export type ImportKind = "es-import" | "require" | "dynamic-import";
 
+export interface ImportSymbolBinding {
+  importedSymbol: string;
+  localBinding: string;
+}
+
 export interface ImportUsage {
   file: string;
   source: string;
   importedSymbols: string[];
+  symbolBindings?: ImportSymbolBinding[];
   defaultImport?: string;
   namespaceImport?: string;
   kind: ImportKind;

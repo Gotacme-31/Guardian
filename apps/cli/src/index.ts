@@ -4,8 +4,11 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 
 import {
+  buildDependencyContexts,
+  findDependencyContext,
   ProjectScanError,
   scanProject,
+  type DependencyContext,
   type DependencyUsage,
   type InstalledDependencyResolution,
   type ProjectScanResult,
@@ -118,8 +121,104 @@ function formatResult(result: ProjectScanResult): string {
   return lines.join("\n");
 }
 
+function formatDependencyContext(context: DependencyContext): string {
+  const lines = [
+    "Guardian Dependency Context",
+    "",
+    "Dependency",
+    `  ${context.dependency}`,
+    "",
+    "Declaration",
+    `  type      ${context.declaration.type}`,
+    `  declared  ${context.declaration.declaredVersion}`,
+    "",
+    "Resolution",
+    `  status    ${context.resolution.status}`,
+  ];
+
+  if (context.resolution.resolvedVersion !== undefined) {
+    lines.push(`  version   ${context.resolution.resolvedVersion}`);
+  }
+  if (context.resolution.resolvedReference !== undefined) {
+    lines.push(`  reference ${context.resolution.resolvedReference}`);
+  }
+  lines.push(`  source    ${context.resolution.kind}`);
+  if (context.resolution.issue !== undefined) {
+    lines.push(`  issue     ${context.resolution.issue}`);
+  }
+  if (context.resolution.importer !== undefined) {
+    lines.push(`  importer  ${context.resolution.importer}`);
+  }
+
+  lines.push(
+    "",
+    "Usage",
+    `  used      ${context.usage.used ? "yes" : "no"}`,
+    `  files     ${context.usage.files.length}`,
+    "",
+    "Files",
+  );
+  if (context.usage.files.length === 0) {
+    lines.push("  none");
+  } else {
+    lines.push(...context.usage.files.map((file) => `  ${file}`));
+  }
+
+  lines.push("", "Imports");
+  const unboundImports = context.usage.imports.filter((item) =>
+    item.defaultImport === undefined
+    && item.namespaceImport === undefined
+    && item.importedSymbols.length === 0);
+  if (context.usage.importedSymbols.length === 0 && unboundImports.length === 0) {
+    lines.push("  none");
+  } else {
+    for (const imported of context.usage.importedSymbols) {
+      const label = imported.bindingKind === "named" ? "symbol" : imported.bindingKind;
+      const symbol = imported.importedSymbol;
+      const binding = symbol === undefined || symbol === "default" || symbol === "*"
+        ? imported.localBinding
+        : symbol === imported.localBinding
+          ? symbol
+          : `${symbol} as ${imported.localBinding}`;
+      lines.push(`  ${label.padEnd(9)} ${binding}`);
+    }
+    for (const importUsage of unboundImports) {
+      lines.push(`  ${importUsage.kind.padEnd(14)} ${importUsage.source}`);
+    }
+  }
+
+  lines.push("", "APIs");
+  if (context.usage.apiUsages.length === 0) {
+    lines.push("  none");
+  } else {
+    for (const apiUsage of context.usage.apiUsages) {
+      const label = apiUsage.canonicalPath ?? apiUsage.localUsagePaths.join(", ");
+      lines.push(`  ${label}`);
+      if (
+        apiUsage.canonicalPath !== undefined
+        && apiUsage.localUsagePaths.some((path) => path !== apiUsage.canonicalPath)
+      ) {
+        lines.push(`    local       ${apiUsage.localUsagePaths.join(", ")}`);
+      }
+      lines.push(
+        `    occurrences ${apiUsage.occurrenceCount}`,
+        `    evidence    ${apiUsage.evidence.join(", ")}`,
+      );
+      for (const occurrence of apiUsage.occurrences) {
+        lines.push(`    ${occurrence.file}:${occurrence.line}:${occurrence.column}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
 function printUsage(): void {
-  console.error("Usage: pnpm guardian scan <project-path>");
+  console.error([
+    "Usage:",
+    "  pnpm guardian scan <project-path>",
+    "  pnpm guardian inspect <project-path> <dependency>",
+  ].join("\n"));
 }
 
 async function validateProjectPath(projectPath: string): Promise<string> {
@@ -143,8 +242,10 @@ async function validateProjectPath(projectPath: string): Promise<string> {
 }
 
 async function main(args: string[]): Promise<void> {
-  const [command, projectPath, ...extraArguments] = args;
-  if (command !== "scan" || projectPath === undefined || extraArguments.length > 0) {
+  const [command, projectPath, dependency, ...extraArguments] = args;
+  const isScan = command === "scan" && projectPath !== undefined && dependency === undefined;
+  const isInspect = command === "inspect" && projectPath !== undefined && dependency !== undefined;
+  if ((!isScan && !isInspect) || extraArguments.length > 0) {
     printUsage();
     process.exitCode = 1;
     return;
@@ -153,7 +254,15 @@ async function main(args: string[]): Promise<void> {
   try {
     const absolutePath = await validateProjectPath(projectPath);
     const result = await scanProject(absolutePath);
-    console.log(formatResult(result));
+    if (isInspect) {
+      const context = findDependencyContext(buildDependencyContexts(result), dependency);
+      if (context === undefined) {
+        throw new Error(`Dependency "${dependency}" is not declared by this project.`);
+      }
+      console.log(formatDependencyContext(context));
+    } else {
+      console.log(formatResult(result));
+    }
   } catch (error) {
     const message = error instanceof ProjectScanError || error instanceof Error
       ? error.message

@@ -4,7 +4,7 @@ Guardian is a local tool for understanding how software projects depend on exter
 
 > Guardian is currently an experimental prototype.
 
-## M2 Project Scanner
+## M3 Dependency Context
 
 Guardian scans a Node.js or TypeScript project without modifying or executing it. It reports:
 
@@ -19,9 +19,11 @@ Guardian scans a Node.js or TypeScript project without modifying or executing it
 - member usage on simple instances created with `new ImportedClass()`;
 - exact direct dependency resolutions from pnpm lockfile v9 importers;
 - registry, workspace, link, file, Git, and URL resolution kinds;
-- unresolved and unsupported resolution states without inspecting `node_modules`.
+- unresolved and unsupported resolution states without inspecting `node_modules`;
+- deterministic dependency contexts correlating declarations, resolutions, imports, and usages;
+- local and safely normalized canonical API paths with their original occurrences.
 
-M2 does not contact registries, compare package releases or APIs, execute target code, generate changes, use AI, or integrate with GitHub.
+M3 does not contact registries, compare package releases or APIs, execute target code, generate changes, use AI, or integrate with GitHub.
 
 ## Architecture
 
@@ -29,6 +31,7 @@ M2 does not contact registries, compare package releases or APIs, execute target
 apps/cli                         argument handling and text output
 packages/project-scanner         read-only project inspection and public contracts
   src/dependency-resolution      normalized resolution and pnpm lockfile adapter
+  src/dependency-context         pure correlation over ProjectScanResult
 test-projects/sample-typescript-app
                                   deterministic scanner fixture
 test-projects/sample-pnpm-workspace
@@ -39,7 +42,14 @@ The CLI contains no source-analysis logic. The scanner exposes:
 
 ```ts
 scanProject(projectPath: string): Promise<ProjectScanResult>
+buildDependencyContexts(scan: ProjectScanResult): DependencyContext[]
+findDependencyContext(contexts: DependencyContext[], dependency: string)
 ```
+
+Dependency contexts are derived in memory from a completed scan. Canonical API paths use
+`default.*` for default imports, `namespace.*` for namespace imports, and the imported symbol
+for named imports. Package subpaths are retained as `package/subpath#API`. Constructor-instance
+usages keep their observed local paths when no canonical mapping is proven.
 
 ## Requirements
 
@@ -58,7 +68,11 @@ From the repository root:
 
 ```bash
 pnpm guardian scan ./test-projects/sample-typescript-app
+pnpm guardian inspect ./test-projects/sample-typescript-app axios
 ```
+
+`inspect` performs one scan and prints the correlated declaration, resolution, imports, evidence,
+and API occurrences for the requested dependency.
 
 The equivalent filtered workspace command is:
 
@@ -109,7 +123,7 @@ axios
 pnpm test
 ```
 
-The tests cover M1/M1.1 scanning and symbol analysis plus pnpm registry and protocol resolutions, peer suffixes, workspace discovery, exact importer selection, typed lockfile errors, unsupported managers, and read-only behavior.
+The tests cover M1/M1.1 scanning, M2 pnpm resolution, and M3 context correlation, canonical API paths, evidence, deterministic summaries, and the `inspect` CLI.
 
 ## Typecheck
 
@@ -143,3 +157,4 @@ If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exist
 - Assignments through destructuring, properties, returns, parameters, containers, or control-flow joins are not followed.
 - A direct reassignment stops subsequent attribution for that binding; Guardian does not attempt branch-sensitive data-flow.
 - Dynamic computed member names are not converted into usage paths.
+- Constructor-instance usages retain their observed local paths but do not receive an invented canonical API path.
