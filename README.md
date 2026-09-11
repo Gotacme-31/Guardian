@@ -4,7 +4,7 @@ Guardian is a local tool for understanding how software projects depend on exter
 
 > Guardian is currently an experimental prototype.
 
-## M4 Target Version Resolution
+## M5 Secure Package Artifact Acquisition
 
 Guardian scans a Node.js or TypeScript project without modifying or executing it. It reports:
 
@@ -23,9 +23,10 @@ Guardian scans a Node.js or TypeScript project without modifying or executing it
 - deterministic dependency contexts correlating declarations, resolutions, imports, and usages;
 - local and safely normalized canonical API paths with their original occurrences;
 - npm target resolution for published versions, dist-tags, and SemVer ranges;
-- normalized upgrade direction between installed and target versions.
+- normalized upgrade direction between installed and target versions;
+- verified npm tarball acquisition into isolated temporary directories.
 
-Only the explicit `target` command contacts the public npm Registry. Guardian does not download packages, compare APIs, execute target code, generate changes, use AI, or integrate with GitHub.
+Target resolution and explicit artifact acquisition can contact the public npm Registry. Guardian does not install or execute downloaded packages, compare APIs, modify target projects, use AI, or integrate with GitHub.
 
 ## Architecture
 
@@ -35,6 +36,7 @@ packages/project-scanner         read-only project inspection and public contrac
   src/dependency-resolution      normalized resolution and pnpm lockfile adapter
   src/dependency-context         pure correlation over ProjectScanResult
   src/target-resolution          npm metadata client and SemVer target resolver
+  src/package-artifact           verified download, tar preflight, extraction, cleanup
 test-projects/sample-typescript-app
                                   deterministic scanner fixture
 test-projects/sample-pnpm-workspace
@@ -48,6 +50,12 @@ scanProject(projectPath: string): Promise<ProjectScanResult>
 buildDependencyContexts(scan: ProjectScanResult): DependencyContext[]
 findDependencyContext(contexts: DependencyContext[], dependency: string)
 resolveDependencyTarget(context: DependencyContext, requestedTarget: string)
+createPackageArtifactAcquirer(options?: ArtifactAcquisitionOptions): PackageArtifactAcquirer
+acquirePackageArtifact(dependency: string, version: string): Promise<AcquiredPackageArtifact>
+acquireDependencyArtifactPair(context: DependencyContext, target: ResolvedDependencyTarget): Promise<AcquiredDependencyArtifactPair>
+cleanupPackageArtifact(artifact: AcquiredPackageArtifact): Promise<void>
+cleanupDependencyArtifactPair(pair: AcquiredDependencyArtifactPair): Promise<void>
+DEFAULT_ARTIFACT_LIMITS
 ```
 
 Dependency contexts are derived in memory from a completed scan. Canonical API paths use
@@ -133,7 +141,7 @@ axios
 pnpm test
 ```
 
-The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, and offline M4 npm metadata, SemVer, cache, timeout, and network-error scenarios.
+The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, offline M4 target resolution, and synthetic M5 tarball acquisition including integrity, limits, traversal, links, cleanup, and network failures.
 
 ## Typecheck
 
@@ -147,7 +155,11 @@ All workspace TypeScript uses strict mode.
 
 Scanning is read-only. Guardian does not install dependencies in the target, execute scripts or source files, alter manifests or lockfiles, or write into the target project.
 
-The scanner uses the maintained `yaml` package only to parse existing pnpm lockfiles. It does not invoke pnpm internals or inspect `node_modules`. Target resolution uses native Node.js `fetch` with an eight-second timeout and a `Guardian/0.0.1` User-Agent.
+The scanner uses the maintained `yaml` package only to parse existing pnpm lockfiles. It does not invoke pnpm internals or inspect `node_modules`. Registry operations use native Node.js `fetch` with an eight-second timeout, a 32 MiB metadata limit, and a `Guardian/0.0.1` User-Agent.
+
+Artifacts are streamed to `guardian-artifact-*` directories directly under the operating system temp directory. SRI metadata is verified with `ssri`; legacy SHA-1 is accepted only when SRI is absent. Extraction starts only after verification, uses `tar` strict mode, rejects links and special entries, and requires an exact `package/package.json` name/version match. Callers own successful artifacts and must invoke the cleanup API; cleanup ownership is tied to the exact returned object and is idempotent.
+
+Default artifact limits are 50 MiB compressed, 250 MiB extracted, 20,000 filesystem entries including implied parents, 50 MiB per file, a 1,000:1 compression ratio, and 256 path segments.
 
 If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exists at the project root, scanning fails with an explicit ambiguity error. Guardian never selects a package manager silently in that situation.
 
@@ -170,4 +182,7 @@ If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exist
 - Constructor-instance usages retain their observed local paths but do not receive an invented canonical API path.
 - Target resolution supports public npm registry dependencies only; private registries and authentication are not supported.
 - Workspace, link, file, Git, URL, and unknown resolution kinds return `unsupported` targets.
-- Target resolution does not download package contents or compare API surfaces.
+- Artifact acquisition accepts only HTTPS tarball URLs on `registry.npmjs.org` and rejects redirects.
+- Artifact storage is temporary and has no persistent cache.
+- Legacy packages with only `dist.shasum` use explicitly reported `sha1-legacy` verification.
+- Package contents are not parsed as TypeScript and API surfaces are not compared yet.

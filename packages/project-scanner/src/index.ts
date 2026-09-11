@@ -1,6 +1,27 @@
 export { ProjectScanError, type ProjectScanErrorCode } from "./errors.js";
 export { scanProject } from "./scanner.js";
 export {
+  acquireDependencyArtifactPair,
+  acquirePackageArtifact,
+  cleanupDependencyArtifactPair,
+  cleanupPackageArtifact,
+  createPackageArtifactAcquirer,
+  DEFAULT_ARTIFACT_LIMITS,
+} from "./package-artifact/index.js";
+export {
+  PackageArtifactError,
+  type PackageArtifactErrorCode,
+} from "./package-artifact/errors.js";
+export type {
+  AcquiredDependencyArtifactPair,
+  AcquiredPackageArtifact,
+  ArtifactAcquisitionLimits,
+  ArtifactAcquisitionOptions,
+  ArtifactVerification,
+  NpmArtifactMetadata,
+  PackageArtifactAcquirer,
+} from "./package-artifact/types.js";
+export {
   classifyUpgradeType,
   createDependencyTargetResolver,
   resolveDependencyTarget,
