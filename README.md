@@ -4,7 +4,7 @@ Guardian is a local tool for understanding how software projects depend on exter
 
 > Guardian is currently an experimental prototype.
 
-## M5 Secure Package Artifact Acquisition
+## M6 TypeScript Declaration Surface Extraction
 
 Guardian scans a Node.js or TypeScript project without modifying or executing it. It reports:
 
@@ -24,9 +24,10 @@ Guardian scans a Node.js or TypeScript project without modifying or executing it
 - local and safely normalized canonical API paths with their original occurrences;
 - npm target resolution for published versions, dist-tags, and SemVer ranges;
 - normalized upgrade direction between installed and target versions;
-- verified npm tarball acquisition into isolated temporary directories.
+- verified npm tarball acquisition into isolated temporary directories;
+- static, normalized TypeScript declaration surfaces from acquired artifacts.
 
-Target resolution and explicit artifact acquisition can contact the public npm Registry. Guardian does not install or execute downloaded packages, compare APIs, modify target projects, use AI, or integrate with GitHub.
+Target resolution and explicit artifact acquisition can contact the public npm Registry. Declaration extraction is offline and never executes package code. Guardian does not install downloaded packages, compare APIs across versions, modify target projects, use AI, or integrate with GitHub.
 
 ## Architecture
 
@@ -37,6 +38,7 @@ packages/project-scanner         read-only project inspection and public contrac
   src/dependency-context         pure correlation over ProjectScanResult
   src/target-resolution          npm metadata client and SemVer target resolver
   src/package-artifact           verified download, tar preflight, extraction, cleanup
+  src/declaration-surface        static declaration entrypoints, exports, and signatures
 test-projects/sample-typescript-app
                                   deterministic scanner fixture
 test-projects/sample-pnpm-workspace
@@ -56,12 +58,26 @@ acquireDependencyArtifactPair(context: DependencyContext, target: ResolvedDepend
 cleanupPackageArtifact(artifact: AcquiredPackageArtifact): Promise<void>
 cleanupDependencyArtifactPair(pair: AcquiredDependencyArtifactPair): Promise<void>
 DEFAULT_ARTIFACT_LIMITS
+extractDeclarationSurface(artifact: AcquiredPackageArtifact, options?: DeclarationSurfaceOptions): Promise<PackageDeclarationSurface>
+DEFAULT_DECLARATION_SURFACE_LIMITS
 ```
 
 Dependency contexts are derived in memory from a completed scan. Canonical API paths use
 `default.*` for default imports, `namespace.*` for namespace imports, and the imported symbol
 for named imports. Package subpaths are retained as `package/subpath#API`. Constructor-instance
 usages keep their observed local paths when no canonical mapping is proven.
+
+Declaration entrypoints retain `exportPath`, package-relative `declarationFile`, and every
+`conditionPaths` route selecting that file. This preserves distinct declaration variants such as
+`types/require` and `types/default` without pretending that one runtime condition is universal.
+For static `.js`, `.mjs`, and `.cjs` export targets, M6 checks only the adjacent `.d.ts`, `.d.mts`,
+or `.d.cts` substitution inside the artifact.
+Each public declaration records its exported identity, declaration kind, deterministic facet,
+package-relative source file, default/export-equals/type-only state, canonical signatures,
+deprecation marker, and normalized members or namespace exports where applicable.
+Each entrypoint also fingerprints non-exported local or relative declarations referenced by its
+public signatures in `referencedDeclarations`, so a future comparison does not need to parse the
+artifact again to detect changes hidden behind a public type name.
 
 ## Requirements
 
@@ -141,7 +157,7 @@ axios
 pnpm test
 ```
 
-The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, offline M4 target resolution, and synthetic M5 tarball acquisition including integrity, limits, traversal, links, cleanup, and network failures.
+The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, offline M4 target resolution, synthetic M5 tarball acquisition, and offline M6 declaration extraction.
 
 ## Typecheck
 
@@ -160,6 +176,17 @@ The scanner uses the maintained `yaml` package only to parse existing pnpm lockf
 Artifacts are streamed to `guardian-artifact-*` directories directly under the operating system temp directory. SRI metadata is verified with `ssri`; legacy SHA-1 is accepted only when SRI is absent. Extraction starts only after verification, uses `tar` strict mode, rejects links and special entries, and requires an exact `package/package.json` name/version match. Callers own successful artifacts and must invoke the cleanup API; cleanup ownership is tied to the exact returned object and is idempotent.
 
 Default artifact limits are 50 MiB compressed, 250 MiB extracted, 20,000 filesystem entries including implied parents, 50 MiB per file, a 1,000:1 compression ratio, and 256 path segments.
+
+Declaration extraction reads only `package.json` and declaration files selected statically by
+`types`, `typings`, `exports`, or the root `index.d.ts` fallback. All metadata and relative
+re-export paths are checked lexically and through canonical filesystem paths. Open files must
+match the validated device/inode, and declaration reads are byte-bounded. Parsing uses a
+`ts-morph` project backed by an in-memory filesystem, so compiler resolution cannot inspect an
+external `node_modules`. M6 never fetches, imports, requires, evaluates, installs, or executes
+package code and never owns artifact cleanup.
+
+Default declaration limits are 512 declaration files, 64 relative re-export edges per path,
+10,000 declarations, 50,000 public/protected members, and 5 MiB per declaration file.
 
 If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exists at the project root, scanning fails with an explicit ambiguity error. Guardian never selects a package manager silently in that situation.
 
@@ -185,4 +212,9 @@ If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exist
 - Artifact acquisition accepts only HTTPS tarball URLs on `registry.npmjs.org` and rejects redirects.
 - Artifact storage is temporary and has no persistent cache.
 - Legacy packages with only `dist.shasum` use explicitly reported `sha1-legacy` verification.
-- Package contents are not parsed as TypeScript and API surfaces are not compared yet.
+- `typesVersions` is reported as `unsupported-types-versions`; M6 does not emulate TypeScript-version selection.
+- Declaration export patterns support one unambiguous wildcard mapped to one wildcard over real files; overlapping or more complex patterns are reported rather than guessed.
+- Relative declaration re-exports are resolved only inside the acquired artifact. External re-exports are represented but their dependency declarations are not resolved.
+- Referenced declaration fingerprints follow local names, relative imports, and inline relative import types; package self-references, triple-slash references, and module augmentations are not fully resolved.
+- Unsupported declaration syntax and ambiguous condition fallback arrays produce normalized issues rather than inferred APIs.
+- M6 does not expand recursive type aliases, evaluate enum/variable initializers, or analyze full JSDoc.

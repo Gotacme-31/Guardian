@@ -1,0 +1,25 @@
+export {
+  DEFAULT_DECLARATION_SURFACE_LIMITS,
+  extractDeclarationSurface,
+} from "./extractor.js";
+export type {
+  DeclarationEntrypoint,
+  DeclarationSurfaceIssue,
+  DeclarationSurfaceIssueCode,
+  DeclarationSurfaceLimits,
+  DeclarationSurfaceOptions,
+  ExternalReexportApiDeclaration,
+  NamespaceApiDeclaration,
+  PackageDeclarationSurface,
+  PublicApiDeclaration,
+  PublicApiDeclarationKind,
+  PublicApiMember,
+  PublicApiMemberKind,
+  ReferencedApiDeclaration,
+  SignatureReferencedApiDeclaration,
+  SignatureApiDeclaration,
+  StructuredReferencedApiDeclaration,
+  StructuredApiDeclaration,
+  NamespaceReferencedApiDeclaration,
+  ExternalReferencedApiDeclaration,
+} from "./types.js";

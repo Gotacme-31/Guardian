@@ -1,6 +1,31 @@
 export { ProjectScanError, type ProjectScanErrorCode } from "./errors.js";
 export { scanProject } from "./scanner.js";
 export {
+  DEFAULT_DECLARATION_SURFACE_LIMITS,
+  extractDeclarationSurface,
+} from "./declaration-surface/index.js";
+export type {
+  DeclarationEntrypoint,
+  DeclarationSurfaceIssue,
+  DeclarationSurfaceIssueCode,
+  DeclarationSurfaceLimits,
+  DeclarationSurfaceOptions,
+  ExternalReexportApiDeclaration,
+  NamespaceApiDeclaration,
+  PackageDeclarationSurface,
+  PublicApiDeclaration,
+  PublicApiDeclarationKind,
+  PublicApiMember,
+  PublicApiMemberKind,
+  ReferencedApiDeclaration,
+  SignatureReferencedApiDeclaration,
+  SignatureApiDeclaration,
+  StructuredReferencedApiDeclaration,
+  StructuredApiDeclaration,
+  NamespaceReferencedApiDeclaration,
+  ExternalReferencedApiDeclaration,
+} from "./declaration-surface/index.js";
+export {
   acquireDependencyArtifactPair,
   acquirePackageArtifact,
   cleanupDependencyArtifactPair,
