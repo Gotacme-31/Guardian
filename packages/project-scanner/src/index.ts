@@ -1,6 +1,28 @@
 export { ProjectScanError, type ProjectScanErrorCode } from "./errors.js";
 export { scanProject } from "./scanner.js";
 export {
+  compareDeclarationSurfaces,
+  DeclarationSurfaceComparisonError,
+} from "./declaration-diff/index.js";
+export type {
+  ComparisonIssueCode,
+  DeclarationComparisonErrorCode,
+  DeclarationComparisonIssue,
+  DeclarationDiffSide,
+  DeclarationPropertyChange,
+  DeclarationPropertyName,
+  DeclarationSourceIssues,
+  DeclarationSurfaceDiffSummary,
+  DeprecationChange,
+  EntrypointChange,
+  ExportChange,
+  MemberChange,
+  PackageDeclarationSurfaceDiff,
+  ProvenanceChange,
+  ReferencedDeclarationChange,
+  SignatureChange,
+} from "./declaration-diff/index.js";
+export {
   DEFAULT_DECLARATION_SURFACE_LIMITS,
   extractDeclarationSurface,
 } from "./declaration-surface/index.js";

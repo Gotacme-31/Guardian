@@ -4,7 +4,7 @@ Guardian is a local tool for understanding how software projects depend on exter
 
 > Guardian is currently an experimental prototype.
 
-## M6 TypeScript Declaration Surface Extraction
+## M7 Deterministic Declaration Surface Comparison
 
 Guardian scans a Node.js or TypeScript project without modifying or executing it. It reports:
 
@@ -25,9 +25,10 @@ Guardian scans a Node.js or TypeScript project without modifying or executing it
 - npm target resolution for published versions, dist-tags, and SemVer ranges;
 - normalized upgrade direction between installed and target versions;
 - verified npm tarball acquisition into isolated temporary directories;
-- static, normalized TypeScript declaration surfaces from acquired artifacts.
+- static, normalized TypeScript declaration surfaces from acquired artifacts;
+- pure structural comparison of two previously extracted declaration surfaces.
 
-Target resolution and explicit artifact acquisition can contact the public npm Registry. Declaration extraction is offline and never executes package code. Guardian does not install downloaded packages, compare APIs across versions, modify target projects, use AI, or integrate with GitHub.
+Target resolution and explicit artifact acquisition can contact the public npm Registry. Declaration extraction and comparison are offline and never execute package code. Guardian does not install downloaded packages, classify breaking changes or risk, modify target projects, use AI, or integrate with GitHub.
 
 ## Architecture
 
@@ -39,6 +40,7 @@ packages/project-scanner         read-only project inspection and public contrac
   src/target-resolution          npm metadata client and SemVer target resolver
   src/package-artifact           verified download, tar preflight, extraction, cleanup
   src/declaration-surface        static declaration entrypoints, exports, and signatures
+  src/declaration-diff           pure deterministic structural surface comparison
 test-projects/sample-typescript-app
                                   deterministic scanner fixture
 test-projects/sample-pnpm-workspace
@@ -60,6 +62,7 @@ cleanupDependencyArtifactPair(pair: AcquiredDependencyArtifactPair): Promise<voi
 DEFAULT_ARTIFACT_LIMITS
 extractDeclarationSurface(artifact: AcquiredPackageArtifact, options?: DeclarationSurfaceOptions): Promise<PackageDeclarationSurface>
 DEFAULT_DECLARATION_SURFACE_LIMITS
+compareDeclarationSurfaces(before: PackageDeclarationSurface, after: PackageDeclarationSurface): PackageDeclarationSurfaceDiff
 ```
 
 Dependency contexts are derived in memory from a completed scan. Canonical API paths use
@@ -78,6 +81,17 @@ deprecation marker, and normalized members or namespace exports where applicable
 Each entrypoint also fingerprints non-exported local or relative declarations referenced by its
 public signatures in `referencedDeclarations`, so a future comparison does not need to parse the
 artifact again to detect changes hidden behind a public type name.
+
+M6 performs extraction and normalization. M7 consumes two completed `PackageDeclarationSurface`
+values and compares entrypoint variants, public facets, canonical signatures, members, nested
+namespaces, external re-exports, and referenced declarations. Entrypoints are identified by
+`exportPath` plus an ordered condition path; declaration files and declaration source files are
+reported separately as provenance. Exports and referenced declarations are identified by their
+public/local name plus M6 facet, with `kind` compared as mutable structure so a function-to-class
+transition remains one modification.
+
+M7 is synchronous and pure. It performs no I/O, parsing, network access, usage correlation,
+breaking-change classification, risk scoring, upgrade recommendation, or rename inference.
 
 ## Requirements
 
@@ -157,7 +171,7 @@ axios
 pnpm test
 ```
 
-The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, offline M4 target resolution, synthetic M5 tarball acquisition, and offline M6 declaration extraction.
+The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, offline M4 target resolution, synthetic M5 tarball acquisition, offline M6 declaration extraction, and pure M7 comparison including variants, facets, overloads, members, namespaces, referenced declarations, provenance, incomplete surfaces, input immutability, and determinism.
 
 ## Typecheck
 
@@ -184,6 +198,13 @@ match the validated device/inode, and declaration reads are byte-bounded. Parsin
 `ts-morph` project backed by an in-memory filesystem, so compiler resolution cannot inspect an
 external `node_modules`. M6 never fetches, imports, requires, evaluates, installs, or executes
 package code and never owns artifact cleanup.
+
+Declaration comparison consumes only the supplied in-memory M6 contracts. Blocking extraction
+issues make the affected entrypoint comparison indeterminate instead of turning incomplete output
+into confirmed additions or removals. Original before/after extraction issues remain available on
+the diff. Duplicate semantic identities are reported explicitly rather than overwritten in a map.
+Recursive declaration graphs are cycle-checked, shared declaration pairs are memoized, and nested
+comparison is capped at 256 levels with a normalized comparison issue instead of stack overflow.
 
 Default declaration limits are 512 declaration files, 64 relative re-export edges per path,
 10,000 declarations, 50,000 public/protected members, and 5 MiB per declaration file.
@@ -218,3 +239,5 @@ If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exist
 - Referenced declaration fingerprints follow local names, relative imports, and inline relative import types; package self-references, triple-slash references, and module augmentations are not fully resolved.
 - Unsupported declaration syntax and ambiguous condition fallback arrays produce normalized issues rather than inferred APIs.
 - M6 does not expand recursive type aliases, evaluate enum/variable initializers, or analyze full JSDoc.
+- M7 reports structural additions, removals, modifications, signature deltas, and provenance only; it does not decide whether any change is breaking, safe, risky, or SemVer-compatible.
+- M7 does not infer symbol renames. A missing name and a new name remain separate removal and addition records.
