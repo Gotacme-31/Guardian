@@ -47,6 +47,16 @@ export type {
   NamespaceReferencedApiDeclaration,
   ExternalReferencedApiDeclaration,
 } from "./declaration-surface/index.js";
+export { correlateUsageImpact, UsageImpactCorrelationError } from "./usage-impact/index.js";
+export type {
+  DependencyUsageImpact,
+  UsageCorrelationIssue,
+  UsageCorrelationIssueCode,
+  UsageImpact,
+  UsageImpactErrorCode,
+  UsageImpactStatus,
+  UsageImpactSummary,
+} from "./usage-impact/index.js";
 export {
   acquireDependencyArtifactPair,
   acquirePackageArtifact,

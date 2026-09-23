@@ -4,7 +4,7 @@ Guardian is a local tool for understanding how software projects depend on exter
 
 > Guardian is currently an experimental prototype.
 
-## M7 Deterministic Declaration Surface Comparison
+## M8 Usage Impact Correlation
 
 Guardian scans a Node.js or TypeScript project without modifying or executing it. It reports:
 
@@ -26,9 +26,10 @@ Guardian scans a Node.js or TypeScript project without modifying or executing it
 - normalized upgrade direction between installed and target versions;
 - verified npm tarball acquisition into isolated temporary directories;
 - static, normalized TypeScript declaration surfaces from acquired artifacts;
-- pure structural comparison of two previously extracted declaration surfaces.
+- pure structural comparison of two previously extracted declaration surfaces;
+- correlation of each recorded API usage against that structural comparison, reported as affected, unaffected, unresolved, or indeterminate.
 
-Target resolution and explicit artifact acquisition can contact the public npm Registry. Declaration extraction and comparison are offline and never execute package code. Guardian does not install downloaded packages, classify breaking changes or risk, modify target projects, use AI, or integrate with GitHub.
+Target resolution and explicit artifact acquisition can contact the public npm Registry. Declaration extraction, comparison, and usage correlation are offline and never execute package code. Guardian does not install downloaded packages, classify breaking changes or risk, modify target projects, use AI, or integrate with GitHub.
 
 ## Architecture
 
@@ -41,6 +42,7 @@ packages/project-scanner         read-only project inspection and public contrac
   src/package-artifact           verified download, tar preflight, extraction, cleanup
   src/declaration-surface        static declaration entrypoints, exports, and signatures
   src/declaration-diff           pure deterministic structural surface comparison
+  src/usage-impact               pure correlation of recorded usage against a surface diff
 test-projects/sample-typescript-app
                                   deterministic scanner fixture
 test-projects/sample-pnpm-workspace
@@ -63,6 +65,7 @@ DEFAULT_ARTIFACT_LIMITS
 extractDeclarationSurface(artifact: AcquiredPackageArtifact, options?: DeclarationSurfaceOptions): Promise<PackageDeclarationSurface>
 DEFAULT_DECLARATION_SURFACE_LIMITS
 compareDeclarationSurfaces(before: PackageDeclarationSurface, after: PackageDeclarationSurface): PackageDeclarationSurfaceDiff
+correlateUsageImpact(context: DependencyContext, installedSurface: PackageDeclarationSurface, diff: PackageDeclarationSurfaceDiff): DependencyUsageImpact
 ```
 
 Dependency contexts are derived in memory from a completed scan. Canonical API paths use
@@ -92,6 +95,23 @@ transition remains one modification.
 
 M7 is synchronous and pure. It performs no I/O, parsing, network access, usage correlation,
 breaking-change classification, risk scoring, upgrade recommendation, or rename inference.
+
+M8 translates each M3 `ApiUsageSummary.canonicalPath` into a location inside the installed
+`PackageDeclarationSurface` (an entrypoint plus a chain of exported/nested-namespace names, ending
+optionally at a class/interface/enum member), then reports whether that location appears in an
+M7 `PackageDeclarationSurfaceDiff`. A usage is `unresolved` when it never had a canonical path or
+the translated location does not exist in the installed surface, `indeterminate` when the
+translation is ambiguous (declaration merging produced more than one candidate facet, a member
+name is shared by more than one declared member such as a getter/setter pair, or the path
+continues past a declaration kind that cannot hold members or nested exports) or when the M7
+diff itself marks the relevant entrypoint variant as indeterminate, `affected` when the location
+appears in the diff's export, member, or nested changes, and `unaffected` otherwise. An entrypoint
+exposed under more than one `conditionPaths` variant is checked against every variant; a change in
+any one of them marks the usage `affected`. M8 never turns missing or ambiguous evidence into a
+confirmed affected/unaffected verdict, mirroring M7's indeterminate-over-guess principle.
+
+M8 is synchronous and pure. It performs no I/O, parsing, or network access, and it does not
+classify breaking changes, score risk, recommend an upgrade, or infer renames.
 
 ## Requirements
 
@@ -171,7 +191,7 @@ axios
 pnpm test
 ```
 
-The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, offline M4 target resolution, synthetic M5 tarball acquisition, offline M6 declaration extraction, and pure M7 comparison including variants, facets, overloads, members, namespaces, referenced declarations, provenance, incomplete surfaces, input immutability, and determinism.
+The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, offline M4 target resolution, synthetic M5 tarball acquisition, offline M6 declaration extraction, pure M7 comparison including variants, facets, overloads, members, namespaces, referenced declarations, provenance, incomplete surfaces, input immutability, and determinism, and pure M8 usage correlation including default/named/namespace-import convergence, member access, ambiguous facets, ambiguous member-name correlation, unresolvable member access, multi-variant entrypoints, indeterminate propagation from M7, installed-surface/diff package and version validation, input immutability, and determinism.
 
 ## Typecheck
 
@@ -209,6 +229,15 @@ comparison is capped at 256 levels with a normalized comparison issue instead of
 Default declaration limits are 512 declaration files, 64 relative re-export edges per path,
 10,000 declarations, 50,000 public/protected members, and 5 MiB per declaration file.
 
+Usage impact correlation reads only the `DependencyContext`, `PackageDeclarationSurface`, and
+`PackageDeclarationSurfaceDiff` objects already produced by M3/M6/M7; it never re-scans the
+project, re-extracts declarations, or performs an additional M7 comparison. It validates that
+`context.dependency`, `installedSurface.packageName`, and `diff.packageName` all agree, and that
+`installedSurface.version` matches `diff.beforeVersion`, before correlating, throwing a typed
+`UsageImpactCorrelationError` (`package-mismatch` or `version-mismatch`) otherwise. Recursion through nested
+namespace exports is bounded by the finite segment count of a canonical path, so no depth limit
+is needed the way M7 needs one for its diff-comparison graph.
+
 If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exists at the project root, scanning fails with an explicit ambiguity error. Guardian never selects a package manager silently in that situation.
 
 ## Current Limitations
@@ -241,3 +270,9 @@ If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exist
 - M6 does not expand recursive type aliases, evaluate enum/variable initializers, or analyze full JSDoc.
 - M7 reports structural additions, removals, modifications, signature deltas, and provenance only; it does not decide whether any change is breaking, safe, risky, or SemVer-compatible.
 - M7 does not infer symbol renames. A missing name and a new name remain separate removal and addition records.
+- M8 only correlates usages whose M3 evidence produced a `canonicalPath`; `constructor-instance` and `unattributed` evidence are reported as `unresolved` with no attempted translation.
+- M8 resolves a "default" root canonical path against either an M6 `default` or `export=` declaration, since M3 cannot distinguish `export default` from CommonJS-interop `export = Foo` in consumer code; this is an M8 extension beyond M3's literal vocabulary, not an M6/M7 concept.
+- A bare namespace-import reference with no accessed member (canonicalPath exactly `"namespace"`) has no single exportedName to correlate against and is reported `indeterminate` with an `unresolvable-member-access` issue rather than attributed to the whole entrypoint.
+- A member name shared by more than one declared member of the same structured declaration (for example a getter and setter with the same name) is reported `indeterminate` with an `ambiguous-member-correlation` issue, distinct from facet ambiguity, which is declaration merging over the exported name itself rather than a name collision among one declaration's members.
+- M8 does not resolve into `referencedDeclarations`; usage translation only ever targets an entrypoint's public `exports` tree, since referenced (non-exported) declarations are not reachable through application-code member access.
+- M8 does not classify affected usages as breaking, safe, or risky, does not score impact, and does not recommend whether to upgrade.

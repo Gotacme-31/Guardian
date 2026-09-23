@@ -2,6 +2,7 @@ export {
   compareDeclarationSurfaces,
   DeclarationSurfaceComparisonError,
 } from "./compare.js";
+export { conditionPathIdentity, entrypointIdentity, memberRole } from "./identity.js";
 export type {
   ComparisonIssueCode,
   DeclarationComparisonErrorCode,
