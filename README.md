@@ -4,7 +4,7 @@ Guardian is a local tool for understanding how software projects depend on exter
 
 > Guardian is currently an experimental prototype.
 
-## M8 Usage Impact Correlation
+## M9 Breaking-Change Classification
 
 Guardian scans a Node.js or TypeScript project without modifying or executing it. It reports:
 
@@ -27,9 +27,10 @@ Guardian scans a Node.js or TypeScript project without modifying or executing it
 - verified npm tarball acquisition into isolated temporary directories;
 - static, normalized TypeScript declaration surfaces from acquired artifacts;
 - pure structural comparison of two previously extracted declaration surfaces;
-- correlation of each recorded API usage against that structural comparison, reported as affected, unaffected, unresolved, or indeterminate.
+- correlation of each recorded API usage against that structural comparison, reported as affected, unaffected, unresolved, or indeterminate;
+- per-usage severity classification of affected usages as breaking, safe, or needs-review, with the specific structural reasons behind each verdict.
 
-Target resolution and explicit artifact acquisition can contact the public npm Registry. Declaration extraction, comparison, and usage correlation are offline and never execute package code. Guardian does not install downloaded packages, classify breaking changes or risk, modify target projects, use AI, or integrate with GitHub.
+Target resolution and explicit artifact acquisition can contact the public npm Registry. Declaration extraction, comparison, usage correlation, and severity classification are offline and never execute package code. Guardian does not install downloaded packages, score risk, recommend upgrades, generate migration patches, modify target projects, use AI, or integrate with GitHub.
 
 ## Architecture
 
@@ -43,6 +44,7 @@ packages/project-scanner         read-only project inspection and public contrac
   src/declaration-surface        static declaration entrypoints, exports, and signatures
   src/declaration-diff           pure deterministic structural surface comparison
   src/usage-impact               pure correlation of recorded usage against a surface diff
+  src/breaking-change            pure per-usage severity classification of usage impact
 test-projects/sample-typescript-app
                                   deterministic scanner fixture
 test-projects/sample-pnpm-workspace
@@ -66,6 +68,7 @@ extractDeclarationSurface(artifact: AcquiredPackageArtifact, options?: Declarati
 DEFAULT_DECLARATION_SURFACE_LIMITS
 compareDeclarationSurfaces(before: PackageDeclarationSurface, after: PackageDeclarationSurface): PackageDeclarationSurfaceDiff
 correlateUsageImpact(context: DependencyContext, installedSurface: PackageDeclarationSurface, diff: PackageDeclarationSurfaceDiff): DependencyUsageImpact
+classifyUsageImpact(usageImpact: DependencyUsageImpact): DependencyImpactClassification
 ```
 
 Dependency contexts are derived in memory from a completed scan. Canonical API paths use
@@ -112,6 +115,23 @@ confirmed affected/unaffected verdict, mirroring M7's indeterminate-over-guess p
 
 M8 is synchronous and pure. It performs no I/O, parsing, or network access, and it does not
 classify breaking changes, score risk, recommend an upgrade, or infer renames.
+
+M9 classifies each `affected` `UsageImpact` from M8 by evaluating its already-flattened
+`matchedChanges` — the leaf-level `ExportChange`/`MemberChange` the usage resolved to, not the
+whole diff subtree beneath it. `export-removed`/`member-removed` are always `breaking`. For a
+modified export or member, a `kind` change is `breaking`; otherwise a deprecation change or any
+other property change is `needs-review`; otherwise a modification made up only of added signatures
+is `safe` while any removed signature is `needs-review`; a modification with no property,
+deprecation, or signature change of its own is `needs-review` as a `nested-change` (the change
+exists only through a member or nested export that is not this exact leaf). A usage with more than
+one matched change takes the worst verdict across all of them, breaking outranking needs-review
+outranking safe, and reports one reason per matched change rather than deduplicating by reason
+code. A usage whose M8 status is not `affected` is classified with no `severity` field at all
+(omitted, not `undefined`) and an empty reason list.
+
+M9 is synchronous and pure. It performs no I/O, parsing, or network access, re-derives nothing
+from M7 or earlier milestones, and does not score risk, recommend an upgrade, or generate a
+migration patch.
 
 ## Requirements
 
@@ -191,7 +211,7 @@ axios
 pnpm test
 ```
 
-The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, offline M4 target resolution, synthetic M5 tarball acquisition, offline M6 declaration extraction, pure M7 comparison including variants, facets, overloads, members, namespaces, referenced declarations, provenance, incomplete surfaces, input immutability, and determinism, and pure M8 usage correlation including default/named/namespace-import convergence, member access, ambiguous facets, ambiguous member-name correlation, unresolvable member access, multi-variant entrypoints, indeterminate propagation from M7, installed-surface/diff package and version validation, input immutability, and determinism.
+The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, offline M4 target resolution, synthetic M5 tarball acquisition, offline M6 declaration extraction, pure M7 comparison including variants, facets, overloads, members, namespaces, referenced declarations, provenance, incomplete surfaces, input immutability, and determinism, pure M8 usage correlation including default/named/namespace-import convergence, member access, ambiguous facets, ambiguous member-name correlation, unresolvable member access, multi-variant entrypoints, indeterminate propagation from M7, installed-surface/diff package and version validation, input immutability, and determinism, and pure M9 severity classification including removal, kind-change, signature-only, property-change, deprecation-change, and nested-change verdicts, defensive export-added/member-added handling, worst-of-many-matched-changes resolution, all three non-affected statuses reporting no severity, input immutability, and determinism.
 
 ## Typecheck
 
@@ -238,6 +258,11 @@ project, re-extracts declarations, or performs an additional M7 comparison. It v
 namespace exports is bounded by the finite segment count of a canonical path, so no depth limit
 is needed the way M7 needs one for its diff-comparison graph.
 
+Severity classification reads only the `DependencyUsageImpact` already produced by M8; it never
+re-derives usage correlation, re-parses a declaration surface, or reruns the M7 comparison. Each
+matched change is evaluated as a single fixed-depth object with no recursion, so it needs no depth
+or size limit of its own.
+
 If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exists at the project root, scanning fails with an explicit ambiguity error. Guardian never selects a package manager silently in that situation.
 
 ## Current Limitations
@@ -276,3 +301,7 @@ If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exist
 - A member name shared by more than one declared member of the same structured declaration (for example a getter and setter with the same name) is reported `indeterminate` with an `ambiguous-member-correlation` issue, distinct from facet ambiguity, which is declaration merging over the exported name itself rather than a name collision among one declaration's members.
 - M8 does not resolve into `referencedDeclarations`; usage translation only ever targets an entrypoint's public `exports` tree, since referenced (non-exported) declarations are not reachable through application-code member access.
 - M8 does not classify affected usages as breaking, safe, or risky, does not score impact, and does not recommend whether to upgrade.
+- M9 does not distinguish a read from a write in a member access; `SymbolUsageKind` does not capture that distinction, so a signature change is classified the same way regardless of how the member was used.
+- M9 does not try to determine whether a specific `signature-removed` matches the user's actual call site; Guardian does not capture argument types at the usage site, so any removed signature on a matched change is treated uniformly as `needs-review`.
+- M9 treats `export-added`/`member-added` as a defensive, effectively unreachable case under the normal M6→M7→M8→M9 pipeline (an M8 leaf can only exist for a declaration already present on the *before* side, which M7 never reports as "added"); it is classified as `needs-review` with reason `unexpected-change-type` rather than assumed impossible, in case that pipeline invariant is ever violated by a caller.
+- M9 does not add risk scoring, upgrade recommendations, or migration-patch generation; it only reports the structural reason behind each verdict.

@@ -57,6 +57,15 @@ export type {
   UsageImpactStatus,
   UsageImpactSummary,
 } from "./usage-impact/index.js";
+export { classifyUsageImpact } from "./breaking-change/index.js";
+export type {
+  ClassifiedUsageImpact,
+  DependencyImpactClassification,
+  ImpactClassificationSummary,
+  ImpactSeverity,
+  SeverityReason,
+  SeverityReasonCode,
+} from "./breaking-change/index.js";
 export {
   acquireDependencyArtifactPair,
   acquirePackageArtifact,
