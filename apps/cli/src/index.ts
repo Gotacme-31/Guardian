@@ -4,16 +4,26 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 
 import {
+  acquireDependencyArtifactPair,
   buildDependencyContexts,
+  classifyUsageImpact,
+  cleanupDependencyArtifactPair,
+  compareDeclarationSurfaces,
+  correlateUsageImpact,
+  extractDeclarationSurface,
   findDependencyContext,
   ProjectScanError,
   resolveDependencyTarget,
   scanProject,
+  type AcquiredDependencyArtifactPair,
   type DependencyContext,
+  type DependencyImpactClassification,
   type DependencyTargetResolution,
   type DependencyUsage,
+  type ImpactSeverity,
   type InstalledDependencyResolution,
   type ProjectScanResult,
+  type UsageImpactSummary,
 } from "@guardian/project-scanner";
 
 const VERSION = "0.0.1";
@@ -254,12 +264,85 @@ function formatTargetResolution(resolution: DependencyTargetResolution): string 
   return lines.join("\n");
 }
 
+const SEVERITY_SECTIONS: ReadonlyArray<{ severity: ImpactSeverity; heading: string }> = [
+  { severity: "breaking", heading: "Breaking" },
+  { severity: "needs-review", heading: "Needs Review" },
+  { severity: "safe", heading: "Safe" },
+];
+
+function formatReason(reason: DependencyImpactClassification["classifications"][number]["reasons"][number]): string {
+  return reason.property === undefined ? reason.code : `${reason.code} (${reason.property})`;
+}
+
+/**
+ * usageImpactSummary is M8's own `unaffected`/`unresolved`/`indeterminate` counts, passed in
+ * rather than recomputed from `classification.classifications` — M9 already omits `severity` for
+ * those three statuses, so `DependencyUsageImpact.summary` is the one place those counts still
+ * live as reliable, already-computed numbers instead of being re-derived from usage.status here.
+ */
+function formatImpactClassification(
+  classification: DependencyImpactClassification,
+  usageImpactSummary: UsageImpactSummary,
+): string {
+  const lines = [
+    "Guardian Impact Report",
+    "",
+    "Dependency",
+    `  ${classification.dependency}`,
+    "",
+    "Versions",
+    `  installed ${classification.beforeVersion}`,
+    `  target    ${classification.afterVersion}`,
+    "",
+    "Summary",
+    `  ${classification.summary.breaking} breaking`,
+    `  ${classification.summary.needsReview} needs-review`,
+    `  ${classification.summary.safe} safe`,
+    `  ${usageImpactSummary.unaffected} unaffected`,
+    `  ${usageImpactSummary.unresolved} unresolved`,
+    `  ${usageImpactSummary.indeterminate} indeterminate`,
+  ];
+
+  for (const { severity, heading } of SEVERITY_SECTIONS) {
+    const matches = classification.classifications.filter((item) => item.severity === severity);
+    if (matches.length === 0) {
+      continue;
+    }
+    lines.push("", heading);
+    for (const item of matches) {
+      const label = item.usage.usage.canonicalPath ?? item.usage.usage.localUsagePaths.join(", ");
+      lines.push(`  ${label}`);
+      for (const occurrence of item.usage.usage.occurrences) {
+        lines.push(`    ${occurrence.file}:${occurrence.line}:${occurrence.column}`);
+      }
+      for (const reason of item.reasons) {
+        lines.push(`    reason  ${formatReason(reason)}`);
+      }
+    }
+  }
+
+  const unclassified = classification.classifications.filter((item) => item.severity === undefined);
+  if (unclassified.length > 0) {
+    lines.push("", "Not classified (no severity: unaffected, unresolved, or indeterminate usage)");
+    for (const item of unclassified) {
+      const label = item.usage.usage.canonicalPath ?? item.usage.usage.localUsagePaths.join(", ");
+      lines.push(`  ${label}  [${item.usage.status}]`);
+      for (const issue of item.usage.issues) {
+        lines.push(`    issue   ${issue.code}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
 function printUsage(): void {
   console.error([
     "Usage:",
     "  pnpm guardian scan <project-path>",
     "  pnpm guardian inspect <project-path> <dependency>",
     "  pnpm guardian target <project-path> <dependency> <target>",
+    "  pnpm guardian impact <project-path> <dependency> <target>",
   ].join("\n"));
 }
 
@@ -297,7 +380,11 @@ async function main(args: string[]): Promise<void> {
     && projectPath !== undefined
     && dependency !== undefined
     && target !== undefined;
-  if ((!isScan && !isInspect && !isTarget) || extraArguments.length > 0) {
+  const isImpact = command === "impact"
+    && projectPath !== undefined
+    && dependency !== undefined
+    && target !== undefined;
+  if ((!isScan && !isInspect && !isTarget && !isImpact) || extraArguments.length > 0) {
     printUsage();
     process.exitCode = 1;
     return;
@@ -306,7 +393,7 @@ async function main(args: string[]): Promise<void> {
   try {
     const absolutePath = await validateProjectPath(projectPath);
     const result = await scanProject(absolutePath);
-    if (isInspect || isTarget) {
+    if (isInspect || isTarget || isImpact) {
       const context = findDependencyContext(buildDependencyContexts(result), dependency);
       if (context === undefined) {
         throw new Error(`Dependency "${dependency}" is not declared by this project.`);
@@ -316,6 +403,43 @@ async function main(args: string[]): Promise<void> {
         console.log(formatTargetResolution(targetResolution));
         if (targetResolution.status !== "resolved") {
           process.exitCode = 1;
+        }
+      } else if (isImpact) {
+        const targetResolution = await resolveDependencyTarget(context, target);
+        if (targetResolution.status !== "resolved") {
+          console.log(formatTargetResolution(targetResolution));
+          process.exitCode = 1;
+          return;
+        }
+        if (context.resolution.status !== "resolved") {
+          const issue = context.resolution.issue === undefined ? "" : ` (${context.resolution.issue})`;
+          console.error(
+            `Guardian: Cannot compute an impact report for "${dependency}": the installed `
+            + `version could not be resolved from the lockfile (status: `
+            + `${context.resolution.status}${issue}).`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        let pair: AcquiredDependencyArtifactPair | undefined;
+        try {
+          pair = await acquireDependencyArtifactPair(context, targetResolution);
+          const [beforeSurface, afterSurface] = await Promise.all([
+            extractDeclarationSurface(pair.installed),
+            extractDeclarationSurface(pair.target),
+          ]);
+          const diff = compareDeclarationSurfaces(beforeSurface, afterSurface);
+          const usageImpact = correlateUsageImpact(context, beforeSurface, diff);
+          const classification = classifyUsageImpact(usageImpact);
+          console.log(formatImpactClassification(classification, usageImpact.summary));
+          if (classification.summary.breaking > 0) {
+            process.exitCode = 1;
+          }
+        } finally {
+          if (pair !== undefined) {
+            await cleanupDependencyArtifactPair(pair);
+          }
         }
       } else {
         console.log(formatDependencyContext(context));

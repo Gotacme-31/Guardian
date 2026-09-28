@@ -4,7 +4,7 @@ Guardian is a local tool for understanding how software projects depend on exter
 
 > Guardian is currently an experimental prototype.
 
-## M9 Breaking-Change Classification
+## M10 CLI Integration
 
 Guardian scans a Node.js or TypeScript project without modifying or executing it. It reports:
 
@@ -28,9 +28,10 @@ Guardian scans a Node.js or TypeScript project without modifying or executing it
 - static, normalized TypeScript declaration surfaces from acquired artifacts;
 - pure structural comparison of two previously extracted declaration surfaces;
 - correlation of each recorded API usage against that structural comparison, reported as affected, unaffected, unresolved, or indeterminate;
-- per-usage severity classification of affected usages as breaking, safe, or needs-review, with the specific structural reasons behind each verdict.
+- per-usage severity classification of affected usages as breaking, safe, or needs-review, with the specific structural reasons behind each verdict;
+- an `impact` CLI command that runs the whole M4-M9 pipeline against a declared dependency and one requested target version, printing a single classified impact report.
 
-Target resolution and explicit artifact acquisition can contact the public npm Registry. Declaration extraction, comparison, usage correlation, and severity classification are offline and never execute package code. Guardian does not install downloaded packages, score risk, recommend upgrades, generate migration patches, modify target projects, use AI, or integrate with GitHub.
+`target` contacts only the public npm Registry to resolve a version. `impact` contacts the registry the same way and additionally downloads the installed and target tarballs to compare their declaration surfaces. Declaration extraction, comparison, usage correlation, and severity classification are themselves offline and never execute package code. Guardian does not install downloaded packages, score risk, recommend upgrades, generate migration patches, modify target projects, use AI, or integrate with GitHub.
 
 ## Architecture
 
@@ -133,6 +134,20 @@ M9 is synchronous and pure. It performs no I/O, parsing, or network access, re-d
 from M7 or earlier milestones, and does not score risk, recommend an upgrade, or generate a
 migration patch.
 
+M10 wires M1-M9 together behind the `impact` CLI command instead of adding new analysis. It scans
+the project, resolves the dependency context, resolves the requested target version exactly like
+`target` does (reusing the same resolution and the same "not resolved" reporting, so that failure
+mode is never duplicated), and — only once a resolved target is in hand — acquires the installed
+and target artifact pair, extracts both declaration surfaces (in parallel; M6's extractor holds no
+shared or global state, so two independent artifact directories can be parsed concurrently),
+diffs them, correlates usage, and classifies the result. Artifact acquisition and cleanup are
+untouched: `acquireDependencyArtifactPair` already cleans up a partially-acquired pair internally
+if the second download fails, so the CLI only needs to guarantee cleanup for the pair it
+successfully receives, in a `finally` that runs whether extraction, diffing, correlation, or
+classification succeeds or throws. `cleanupPackageArtifact` is idempotent (a second cleanup call
+on an already-cleaned artifact is a documented no-op), so this guarantee composes safely with
+`cleanupDependencyArtifactPair`'s own internal cleanup of both artifacts.
+
 ## Requirements
 
 - Node.js 20 or newer
@@ -152,6 +167,7 @@ From the repository root:
 pnpm guardian scan ./test-projects/sample-typescript-app
 pnpm guardian inspect ./test-projects/sample-typescript-app axios
 pnpm guardian target ./test-projects/sample-typescript-app axios latest
+pnpm guardian impact ./test-projects/sample-typescript-app axios 1.6.0
 ```
 
 `inspect` performs one scan and prints the correlated declaration, resolution, imports, evidence,
@@ -161,6 +177,15 @@ and API occurrences for the requested dependency.
 version from a dist-tag, exact version, or SemVer range, and reports the version change type,
 including prerelease-only transitions.
 `scan` and `inspect` remain offline.
+
+`impact` resolves the target exactly like `target` does — printing the same target-resolution
+report and exiting with code 1 if it does not resolve, without duplicating that logic — then, only
+if the target resolved, downloads both the installed and target tarballs, extracts and compares
+their declaration surfaces, correlates every recorded usage against that comparison, classifies
+each affected usage as breaking, safe, or needs-review, and prints one impact report. It exits with
+code 1 if any usage is classified breaking. If the installed version itself could not be resolved
+from the lockfile, `impact` reports that clearly and exits with code 1 before attempting to
+download anything.
 
 The equivalent filtered workspace command is:
 
@@ -205,13 +230,80 @@ axios
     axios.create                   src/second-http.ts:3:29
 ```
 
+`impact` output, from a real run against the public registry (`pnpm guardian impact ./test-projects/sample-typescript-app axios 1.6.0`):
+
+```text
+Guardian Impact Report
+
+Dependency
+  axios
+
+Versions
+  installed 1.7.9
+  target    1.6.0
+
+Summary
+  0 breaking
+  0 needs-review
+  0 safe
+  1 unaffected
+  0 unresolved
+  5 indeterminate
+
+Not classified (no severity: unaffected, unresolved, or indeterminate usage)
+  AxiosError  [unaffected]
+    issue   declaration-not-found
+  default  [indeterminate]
+    issue   ambiguous-facet-correlation
+  default.create  [indeterminate]
+    issue   ambiguous-facet-correlation
+    issue   declaration-not-found
+    issue   unresolvable-member-access
+    issue   unresolvable-member-access
+  default.defaults.headers.common  [indeterminate]
+    issue   ambiguous-facet-correlation
+    issue   declaration-not-found
+    issue   unresolvable-member-access
+    issue   unresolvable-member-access
+  default.get  [indeterminate]
+    issue   ambiguous-facet-correlation
+    issue   declaration-not-found
+    issue   unresolvable-member-access
+    issue   unresolvable-member-access
+  default.post  [indeterminate]
+    issue   ambiguous-facet-correlation
+    issue   declaration-not-found
+    issue   unresolvable-member-access
+    issue   unresolvable-member-access
+```
+
+axios's declaration surface merges two declarations under a single `export=` root — the
+CommonJS-interop pattern the "default"-root fallback above exists for: a `namespace` carrying its
+type-only exports (`AxiosError`, `AxiosInstance`, `AxiosRequestConfig`, and roughly fifty more),
+and a separate `variable` declaration, `const: axios.AxiosStatic`, that is the actual callable
+runtime value. M6 records these as two facets of the same exportedName. M8 has no way to tell,
+from a usage's `SymbolUsageKind` alone (call/member-access/constructor/reference), which of the
+two merged facets a given `default.*` usage actually resolves to, so root resolution reports
+`ambiguous-facet-correlation` instead of guessing. That root-level ambiguity is what produces the
+five `indeterminate` entries above: `default` itself and every access nested under it
+(`default.create`, `default.get`, `default.post`, `default.defaults.headers.common`) carry the
+same unresolved choice of facet, visible in the `issue` lines each entry prints. This is the same
+conservative principle M7 established for duplicate declaration-merged exports, carried through to
+M8's usage correlation: an ambiguous match is reported `indeterminate` rather than resolved by
+guessing. A cheap heuristic could likely resolve most of this class of ambiguity without guessing:
+when one candidate facet is a `namespace` (type-only, no runtime value) and another is not, a
+`SymbolUsageKind` of `call` or `member-access` almost never legitimately resolves against the
+`namespace` facet, since there is nothing to call or access on something that exists only as a
+type — preferring the non-`namespace` facet for runtime-shaped usage evidence is a plausible future
+M8 improvement, not something this milestone implements.
+
 ## Tests
 
 ```bash
 pnpm test
 ```
 
-The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, offline M4 target resolution, synthetic M5 tarball acquisition, offline M6 declaration extraction, pure M7 comparison including variants, facets, overloads, members, namespaces, referenced declarations, provenance, incomplete surfaces, input immutability, and determinism, pure M8 usage correlation including default/named/namespace-import convergence, member access, ambiguous facets, ambiguous member-name correlation, unresolvable member access, multi-variant entrypoints, indeterminate propagation from M7, installed-surface/diff package and version validation, input immutability, and determinism, and pure M9 severity classification including removal, kind-change, signature-only, property-change, deprecation-change, and nested-change verdicts, defensive export-added/member-added handling, worst-of-many-matched-changes resolution, all three non-affected statuses reporting no severity, input immutability, and determinism.
+The tests cover M1/M1.1 scanning, M2 pnpm resolution, M3 context correlation, offline M4 target resolution, synthetic M5 tarball acquisition, offline M6 declaration extraction, pure M7 comparison including variants, facets, overloads, members, namespaces, referenced declarations, provenance, incomplete surfaces, input immutability, and determinism, pure M8 usage correlation including default/named/namespace-import convergence, member access, ambiguous facets, ambiguous member-name correlation, unresolvable member access, multi-variant entrypoints, indeterminate propagation from M7, installed-surface/diff package and version validation, input immutability, and determinism, pure M9 severity classification including removal, kind-change, signature-only, property-change, deprecation-change, and nested-change verdicts, defensive export-added/member-added handling, worst-of-many-matched-changes resolution, all three non-affected statuses reporting no severity, input immutability, and determinism, and an M10 end-to-end test that chains a real M5 artifact acquisition into real M6 extraction, M7 comparison, M8 correlation, and M9 classification against synthetic before/after tarballs (something no earlier milestone's tests exercised together), asserting a removed function classifies as breaking and that artifact cleanup runs both on success and when a later pipeline step throws.
 
 ## Typecheck
 
@@ -305,3 +397,7 @@ If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exist
 - M9 does not try to determine whether a specific `signature-removed` matches the user's actual call site; Guardian does not capture argument types at the usage site, so any removed signature on a matched change is treated uniformly as `needs-review`.
 - M9 treats `export-added`/`member-added` as a defensive, effectively unreachable case under the normal M6→M7→M8→M9 pipeline (an M8 leaf can only exist for a declaration already present on the *before* side, which M7 never reports as "added"); it is classified as `needs-review` with reason `unexpected-change-type` rather than assumed impossible, in case that pipeline invariant is ever violated by a caller.
 - M9 does not add risk scoring, upgrade recommendations, or migration-patch generation; it only reports the structural reason behind each verdict.
+- `impact` takes exactly the same three positional arguments as `target` (project path, dependency, target); it adds no new CLI flags or options.
+- `impact` never authorizes, applies, or generates a migration for any change; it only reports. Deciding to upgrade, applying a codemod, or opening a pull request are not in scope for this or any earlier milestone.
+- If the installed version cannot be resolved from the lockfile (`context.resolution.status !== "resolved"`), `impact` reports that explicitly and exits before attempting any artifact acquisition, rather than surfacing `acquireDependencyArtifactPair`'s own lower-level `PackageArtifactError`.
+- `impact`'s exit code reflects only `classification.summary.breaking > 0`; a needs-review-only or fully indeterminate result exits 0, matching every other command's convention of a nonzero exit only for a clear failure condition, not for "worth a second look."
