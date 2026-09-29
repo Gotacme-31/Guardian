@@ -281,21 +281,27 @@ axios's declaration surface merges two declarations under a single `export=` roo
 CommonJS-interop pattern the "default"-root fallback above exists for: a `namespace` carrying its
 type-only exports (`AxiosError`, `AxiosInstance`, `AxiosRequestConfig`, and roughly fifty more),
 and a separate `variable` declaration, `const: axios.AxiosStatic`, that is the actual callable
-runtime value. M6 records these as two facets of the same exportedName. M8 has no way to tell,
-from a usage's `SymbolUsageKind` alone (call/member-access/constructor/reference), which of the
-two merged facets a given `default.*` usage actually resolves to, so root resolution reports
-`ambiguous-facet-correlation` instead of guessing. That root-level ambiguity is what produces the
-five `indeterminate` entries above: `default` itself and every access nested under it
-(`default.create`, `default.get`, `default.post`, `default.defaults.headers.common`) carry the
-same unresolved choice of facet, visible in the `issue` lines each entry prints. This is the same
-conservative principle M7 established for duplicate declaration-merged exports, carried through to
-M8's usage correlation: an ambiguous match is reported `indeterminate` rather than resolved by
-guessing. A cheap heuristic could likely resolve most of this class of ambiguity without guessing:
-when one candidate facet is a `namespace` (type-only, no runtime value) and another is not, a
-`SymbolUsageKind` of `call` or `member-access` almost never legitimately resolves against the
-`namespace` facet, since there is nothing to call or access on something that exists only as a
-type — preferring the non-`namespace` facet for runtime-shaped usage evidence is a plausible future
-M8 improvement, not something this milestone implements.
+runtime value. M6 records these as two facets of the same exportedName, but only inside axios's
+CommonJS-interop declaration entrypoint (`index.d.cts`, reached under the `types`/`require`
+condition); axios's separate ESM entrypoint (`index.d.ts`, `types`/`default`) declares a single,
+unambiguous `default` facet with no merge at all. `correlateUsageImpact` checks every
+`DeclarationEntrypoint` sharing an `exportPath` together and combines their outcomes by taking the
+worst status across all of them (`combineVariants`), so the CJS entrypoint's facet ambiguity
+contaminates the final verdict even though a real project resolving axios through TypeScript's
+standard ESM resolution would never take that code path. That is the real, structural reason all
+five `indeterminate` entries above exist, and it generalizes to any dual CJS/ESM package with a
+CommonJS-interop declaration file — not a Guardian-specific quirk of axios.
+
+We investigated a narrower, unrelated hypothesis first: whether M8 could prefer a non-`namespace`
+merged facet when the usage's `SymbolUsageKind` implies a runtime value (`call`/`member-access`/
+`constructor`). That investigation found the idea does not actually help this case: axios's own
+bare `default` reference is a `SymbolUsageKind` of `reference`, which cannot be disambiguated this
+way (a value passed by reference imposes no shape requirement, unlike a call or construction), and
+the other four usages have canonical-path segments remaining past the ambiguous root, where
+excluding the `namespace` candidate risks cutting off a legitimate resolution instead of a
+guess. The heuristic is deliberately not implemented; it may still have value for a package that
+merges an invocable function (not just a value) with a namespace under one name, but that is
+unverified, not something demonstrated by this investigation.
 
 ## Tests
 
@@ -401,3 +407,9 @@ If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exist
 - `impact` never authorizes, applies, or generates a migration for any change; it only reports. Deciding to upgrade, applying a codemod, or opening a pull request are not in scope for this or any earlier milestone.
 - If the installed version cannot be resolved from the lockfile (`context.resolution.status !== "resolved"`), `impact` reports that explicitly and exits before attempting any artifact acquisition, rather than surfacing `acquireDependencyArtifactPair`'s own lower-level `PackageArtifactError`.
 - `impact`'s exit code reflects only `classification.summary.breaking > 0`; a needs-review-only or fully indeterminate result exits 0, matching every other command's convention of a nonzero exit only for a clear failure condition, not for "worth a second look."
+- `impact` and `correlateUsageImpact` check every `DeclarationEntrypoint` sharing an `exportPath`
+  together, combining their outcomes by the worst status across all of them. This means a
+  comparison issue or facet ambiguity in one declaration-file variant (for example a CommonJS-
+  interop entrypoint) can mark a usage `indeterminate` even when the specific entrypoint variant a
+  consuming project's real module resolution would select is unambiguous. Guardian does not yet
+  determine which entrypoint variant a project's actual resolution settings would pick.
