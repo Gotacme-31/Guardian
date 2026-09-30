@@ -75,6 +75,20 @@ export type {
   MigrationProposalSummary,
 } from "./migration-proposal/index.js";
 export {
+  applyVersionBump,
+  checkVersionBumpEligibility,
+  composeVersionBump,
+} from "./version-bump/index.js";
+export type {
+  ComposedVersionBump,
+  VersionBumpBlockingReason,
+  VersionBumpEligibility,
+  VersionBumpWriteError,
+  VersionBumpWriteResult,
+  VersionCompositionError,
+  VersionRangeOperator,
+} from "./version-bump/index.js";
+export {
   acquireDependencyArtifactPair,
   acquirePackageArtifact,
   cleanupDependencyArtifactPair,

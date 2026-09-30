@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   acquireDependencyArtifactPair,
   buildMigrationProposal,
+  checkVersionBumpEligibility,
   classifyUsageImpact,
   cleanupDependencyArtifactPair,
   compareDeclarationSurfaces,
@@ -374,5 +375,86 @@ describe("full migration proposal pipeline (M5 -> ... -> M9 -> M11)", () => {
 
     expect(await pathExists(pair.installed.temporaryRoot)).toBe(false);
     expect(await pathExists(pair.target.temporaryRoot)).toBe(false);
+  });
+});
+
+describe("version bump eligibility after a fully safe proposal (M5 -> ... -> M11 -> M12 eligibility)", () => {
+  it("marks a proposal with zero breaking/needs-review/unresolved/indeterminate usages as eligible", async () => {
+    const declarations = "export function keepMe(): void;\n";
+    const installedTarball = fixtureTarball("1.0.0", declarations);
+    const targetTarball = fixtureTarball("1.0.1", declarations);
+    const fetchFixture = twoVersionRegistryFixture({
+      installedVersion: "1.0.0",
+      targetVersion: "1.0.1",
+      installedTarball,
+      targetTarball,
+    });
+    const base = fixtureContext();
+    const context: DependencyContext = {
+      ...base,
+      usage: {
+        used: true,
+        files: ["src/index.ts"],
+        imports: [{
+          file: "src/index.ts",
+          source: "fixture-dep",
+          importedSymbols: ["keepMe"],
+          symbolBindings: [{ importedSymbol: "keepMe", localBinding: "keepMe" }],
+          kind: "es-import",
+        }],
+        importedSymbols: [],
+        apiUsages: [{
+          canonicalPath: "keepMe",
+          localUsagePaths: ["keepMe"],
+          occurrenceCount: 1,
+          evidence: ["direct-import"],
+          occurrences: [{
+            dependency: "fixture-dep",
+            file: "src/index.ts",
+            importedSymbol: "keepMe",
+            localBinding: "keepMe",
+            usagePath: "keepMe",
+            kind: "call",
+            line: 3,
+            column: 1,
+          }],
+        }],
+      },
+    };
+    const target: ResolvedDependencyTarget = {
+      ...fixtureTarget(),
+      requestedTarget: "1.0.1",
+      resolvedVersion: "1.0.1",
+      upgradeType: "patch",
+    };
+
+    const pair = await acquireDependencyArtifactPair(context, target, { fetch: fetchFixture });
+    let proposal;
+    try {
+      const [beforeSurface, afterSurface] = await Promise.all([
+        extractDeclarationSurface(pair.installed),
+        extractDeclarationSurface(pair.target),
+      ]);
+      const diff = compareDeclarationSurfaces(beforeSurface, afterSurface);
+      const usageImpact = correlateUsageImpact(context, beforeSurface, diff);
+      const classification = classifyUsageImpact(usageImpact);
+      proposal = buildMigrationProposal(classification);
+    } finally {
+      await cleanupDependencyArtifactPair(pair);
+    }
+
+    expect(proposal.summary).toEqual({
+      breaking: 0,
+      needsReview: 0,
+      safe: 0,
+      unaffected: 1,
+      unresolved: 0,
+      indeterminate: 0,
+    });
+
+    expect(checkVersionBumpEligibility(proposal.summary)).toEqual({
+      eligible: true,
+      blockingReasons: [],
+    });
   });
 });

@@ -5,11 +5,14 @@ import path from "node:path";
 
 import {
   acquireDependencyArtifactPair,
+  applyVersionBump,
   buildDependencyContexts,
   buildMigrationProposal,
+  checkVersionBumpEligibility,
   classifyUsageImpact,
   cleanupDependencyArtifactPair,
   compareDeclarationSurfaces,
+  composeVersionBump,
   correlateUsageImpact,
   extractDeclarationSurface,
   findDependencyContext,
@@ -26,8 +29,10 @@ import {
   type MigrationProposal,
   type MigrationProposalItem,
   type MigrationProposalReviewItem,
+  type MigrationProposalSummary,
   type ProjectScanResult,
   type UsageImpactSummary,
+  type VersionBumpBlockingReason,
 } from "@guardian/project-scanner";
 
 const VERSION = "0.0.1";
@@ -418,6 +423,13 @@ function formatMigrationProposal(proposal: MigrationProposal): string {
   return lines.join("\n");
 }
 
+const BLOCKING_REASON_COUNT: Record<VersionBumpBlockingReason, (summary: MigrationProposalSummary) => number> = {
+  "breaking-changes-present": (summary) => summary.breaking,
+  "needs-review-present": (summary) => summary.needsReview,
+  "unresolved-usages-present": (summary) => summary.unresolved,
+  "indeterminate-usages-present": (summary) => summary.indeterminate,
+};
+
 function printUsage(): void {
   console.error([
     "Usage:",
@@ -426,6 +438,7 @@ function printUsage(): void {
     "  pnpm guardian target <project-path> <dependency> <target>",
     "  pnpm guardian impact <project-path> <dependency> <target>",
     "  pnpm guardian propose <project-path> <dependency> <target> [--json]",
+    "  pnpm guardian apply <project-path> <dependency> <target> [--yes]",
   ].join("\n"));
 }
 
@@ -449,14 +462,24 @@ async function validateProjectPath(projectPath: string): Promise<string> {
   return absolutePath;
 }
 
+function extractFlag(args: readonly string[], flag: string): { present: boolean; rest: string[] } {
+  const index = args.indexOf(flag);
+  if (index === -1) {
+    return { present: false, rest: [...args] };
+  }
+  return { present: true, rest: [...args.slice(0, index), ...args.slice(index + 1)] };
+}
+
 async function main(args: string[]): Promise<void> {
-  // --json only means something for `propose`; stripping it here (and only when the command is
-  // literally "propose") keeps every other command's strict extra-argument rejection unchanged.
-  const jsonFlagIndex = args[0] === "propose" ? args.indexOf("--json") : -1;
-  const jsonRequested = jsonFlagIndex !== -1;
-  const positionalArgs = jsonFlagIndex === -1
-    ? args
-    : [...args.slice(0, jsonFlagIndex), ...args.slice(jsonFlagIndex + 1)];
+  // --json/--yes only mean something for `propose`/`apply` respectively; stripping each one here
+  // (and only when the command literally matches) keeps every other command's strict
+  // extra-argument rejection unchanged.
+  const { present: jsonRequested, rest: afterJson } = args[0] === "propose"
+    ? extractFlag(args, "--json")
+    : { present: false, rest: args };
+  const { present: applyRequested, rest: positionalArgs } = args[0] === "apply"
+    ? extractFlag(afterJson, "--yes")
+    : { present: false, rest: afterJson };
 
   const [command, projectPath, dependency, target, ...extraArguments] = positionalArgs;
   const isScan = command === "scan"
@@ -479,8 +502,12 @@ async function main(args: string[]): Promise<void> {
     && projectPath !== undefined
     && dependency !== undefined
     && target !== undefined;
+  const isApply = command === "apply"
+    && projectPath !== undefined
+    && dependency !== undefined
+    && target !== undefined;
   if (
-    (!isScan && !isInspect && !isTarget && !isImpact && !isPropose)
+    (!isScan && !isInspect && !isTarget && !isImpact && !isPropose && !isApply)
     || extraArguments.length > 0
   ) {
     printUsage();
@@ -491,7 +518,7 @@ async function main(args: string[]): Promise<void> {
   try {
     const absolutePath = await validateProjectPath(projectPath);
     const result = await scanProject(absolutePath);
-    if (isInspect || isTarget || isImpact || isPropose) {
+    if (isInspect || isTarget || isImpact || isPropose || isApply) {
       const context = findDependencyContext(buildDependencyContexts(result), dependency);
       if (context === undefined) {
         throw new Error(`Dependency "${dependency}" is not declared by this project.`);
@@ -577,6 +604,106 @@ async function main(args: string[]): Promise<void> {
             await cleanupDependencyArtifactPair(pair);
           }
         }
+      } else if (isApply) {
+        const targetResolution = await resolveDependencyTarget(context, target);
+        if (targetResolution.status !== "resolved") {
+          console.log(formatTargetResolution(targetResolution));
+          process.exitCode = 1;
+          return;
+        }
+        if (context.resolution.status !== "resolved") {
+          const issue = context.resolution.issue === undefined ? "" : ` (${context.resolution.issue})`;
+          console.error(
+            `Guardian: Cannot evaluate a version bump for "${dependency}": the installed `
+            + `version could not be resolved from the lockfile (status: `
+            + `${context.resolution.status}${issue}).`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        let pair: AcquiredDependencyArtifactPair | undefined;
+        let proposal: MigrationProposal;
+        try {
+          pair = await acquireDependencyArtifactPair(context, targetResolution);
+          const [beforeSurface, afterSurface] = await Promise.all([
+            extractDeclarationSurface(pair.installed),
+            extractDeclarationSurface(pair.target),
+          ]);
+          const diff = compareDeclarationSurfaces(beforeSurface, afterSurface);
+          const usageImpact = correlateUsageImpact(context, beforeSurface, diff);
+          const classification = classifyUsageImpact(usageImpact);
+          proposal = buildMigrationProposal(classification);
+        } finally {
+          if (pair !== undefined) {
+            await cleanupDependencyArtifactPair(pair);
+          }
+        }
+
+        const eligibility = checkVersionBumpEligibility(proposal.summary);
+        if (!eligibility.eligible) {
+          console.log([
+            "Not eligible for automatic version bump:",
+            ...eligibility.blockingReasons.map((reason) =>
+              `  - ${reason} (${BLOCKING_REASON_COUNT[reason](proposal.summary)})`),
+          ].join("\n"));
+          process.exitCode = 1;
+          return;
+        }
+
+        const declaredVersion = context.declaration.declaredVersion;
+        const composed = composeVersionBump(declaredVersion, targetResolution.resolvedVersion);
+        if ("error" in composed) {
+          console.error(
+            `Guardian: Cannot compose a new declared version for "${dependency}": ${composed.error} `
+            + `(declared "${declaredVersion}" is not a plain exact/^/~ semver range).`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        if (!applyRequested) {
+          console.log([
+            "Eligible for automatic version bump.",
+            "",
+            "Dependency",
+            `  ${dependency}`,
+            "",
+            "Change",
+            `  ${declaredVersion} -> ${composed.newDeclaredVersion}`,
+            "",
+            "Re-run with --yes to apply this change.",
+          ].join("\n"));
+          return;
+        }
+
+        const writeResult = await applyVersionBump(
+          absolutePath,
+          dependency,
+          context.declaration.type,
+          declaredVersion,
+          composed.newDeclaredVersion,
+        );
+        if ("error" in writeResult) {
+          console.error(
+            `Guardian: Could not apply the version bump for "${dependency}": ${writeResult.error}.`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        console.log([
+          "Applied version bump.",
+          "",
+          "File",
+          `  ${writeResult.packageJsonPath}`,
+          "",
+          "Field",
+          `  ${writeResult.field}`,
+          "",
+          "Change",
+          `  ${writeResult.previousDeclaredVersion} -> ${writeResult.newDeclaredVersion}`,
+        ].join("\n"));
       } else {
         console.log(formatDependencyContext(context));
       }
