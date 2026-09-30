@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   acquireDependencyArtifactPair,
+  buildMigrationProposal,
   classifyUsageImpact,
   cleanupDependencyArtifactPair,
   compareDeclarationSurfaces,
@@ -312,6 +313,65 @@ describe("full impact pipeline (M5 -> M6 -> M7 -> M8 -> M9)", () => {
     if (pair === undefined) {
       throw new Error("expected the pair to have been acquired before the forced failure");
     }
+    expect(await pathExists(pair.installed.temporaryRoot)).toBe(false);
+    expect(await pathExists(pair.target.temporaryRoot)).toBe(false);
+  });
+});
+
+describe("full migration proposal pipeline (M5 -> ... -> M9 -> M11)", () => {
+  it("produces a breaking MigrationProposalItem with a verbatim description for a removed export", async () => {
+    const installedTarball = fixtureTarball(
+      "1.0.0",
+      "export function keepMe(): void;\nexport function removeMe(): void;\n",
+    );
+    const targetTarball = fixtureTarball("2.0.0", "export function keepMe(): void;\n");
+    const fetchFixture = twoVersionRegistryFixture({
+      installedVersion: "1.0.0",
+      targetVersion: "2.0.0",
+      installedTarball,
+      targetTarball,
+    });
+    const context = fixtureContext();
+
+    const pair = await acquireDependencyArtifactPair(context, fixtureTarget(), {
+      fetch: fetchFixture,
+    });
+    let proposal;
+    try {
+      const [beforeSurface, afterSurface] = await Promise.all([
+        extractDeclarationSurface(pair.installed),
+        extractDeclarationSurface(pair.target),
+      ]);
+      const diff = compareDeclarationSurfaces(beforeSurface, afterSurface);
+      const usageImpact = correlateUsageImpact(context, beforeSurface, diff);
+      const classification = classifyUsageImpact(usageImpact);
+      proposal = buildMigrationProposal(classification);
+    } finally {
+      await cleanupDependencyArtifactPair(pair);
+    }
+
+    expect(proposal.summary).toEqual({
+      breaking: 1,
+      needsReview: 0,
+      safe: 0,
+      unaffected: 0,
+      unresolved: 0,
+      indeterminate: 0,
+    });
+    expect(proposal.breaking).toEqual([{
+      canonicalPath: "removeMe",
+      localUsagePaths: ["removeMe"],
+      occurrences: [expect.objectContaining({ file: "src/index.ts", line: 5, column: 3 })],
+      severity: "breaking",
+      changes: [{
+        reason: { code: "export-removed" },
+        description: 'Export "removeMe" (function) was removed.',
+      }],
+    }]);
+    expect(proposal.needsReview).toEqual([]);
+    expect(proposal.safe).toEqual([]);
+    expect(proposal.review).toEqual([]);
+
     expect(await pathExists(pair.installed.temporaryRoot)).toBe(false);
     expect(await pathExists(pair.target.temporaryRoot)).toBe(false);
   });

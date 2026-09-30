@@ -66,6 +66,14 @@ export type {
   SeverityReason,
   SeverityReasonCode,
 } from "./breaking-change/index.js";
+export { buildMigrationProposal } from "./migration-proposal/index.js";
+export type {
+  MigrationProposal,
+  MigrationProposalChangeDescription,
+  MigrationProposalItem,
+  MigrationProposalReviewItem,
+  MigrationProposalSummary,
+} from "./migration-proposal/index.js";
 export {
   acquireDependencyArtifactPair,
   acquirePackageArtifact,

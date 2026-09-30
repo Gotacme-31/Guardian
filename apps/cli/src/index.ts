@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   acquireDependencyArtifactPair,
   buildDependencyContexts,
+  buildMigrationProposal,
   classifyUsageImpact,
   cleanupDependencyArtifactPair,
   compareDeclarationSurfaces,
@@ -22,6 +23,9 @@ import {
   type DependencyUsage,
   type ImpactSeverity,
   type InstalledDependencyResolution,
+  type MigrationProposal,
+  type MigrationProposalItem,
+  type MigrationProposalReviewItem,
   type ProjectScanResult,
   type UsageImpactSummary,
 } from "@guardian/project-scanner";
@@ -336,6 +340,84 @@ function formatImpactClassification(
   return lines.join("\n");
 }
 
+const PROPOSAL_SEVERITY_SECTIONS: ReadonlyArray<{
+  key: "breaking" | "needsReview" | "safe";
+  heading: string;
+}> = [
+  { key: "breaking", heading: "Breaking" },
+  { key: "needsReview", heading: "Needs Review" },
+  { key: "safe", heading: "Safe" },
+];
+
+function formatMigrationProposalItem(item: MigrationProposalItem, lines: string[]): void {
+  const label = item.canonicalPath ?? item.localUsagePaths.join(", ");
+  lines.push(`  ${label}`);
+  for (const occurrence of item.occurrences) {
+    lines.push(`    ${occurrence.file}:${occurrence.line}:${occurrence.column}`);
+  }
+  for (const change of item.changes) {
+    const [firstLine, ...restLines] = change.description.split("\n") as [string, ...string[]];
+    lines.push(`    change  ${firstLine}`);
+    for (const rest of restLines) {
+      lines.push(`            ${rest}`);
+    }
+  }
+}
+
+function formatMigrationProposalReviewItem(item: MigrationProposalReviewItem, lines: string[]): void {
+  const label = item.canonicalPath ?? item.localUsagePaths.join(", ");
+  lines.push(`  ${label}  [${item.status}]`);
+  for (const occurrence of item.occurrences) {
+    lines.push(`    ${occurrence.file}:${occurrence.line}:${occurrence.column}`);
+  }
+  for (const issue of item.issues) {
+    lines.push(`    issue   ${issue.code}: ${issue.message}`);
+  }
+}
+
+function formatMigrationProposal(proposal: MigrationProposal): string {
+  const lines = [
+    "Guardian Migration Proposal",
+    "",
+    "Dependency",
+    `  ${proposal.dependency}`,
+    "",
+    "Versions",
+    `  installed ${proposal.beforeVersion}`,
+    `  target    ${proposal.afterVersion}`,
+    "",
+    "Summary",
+    `  ${proposal.summary.breaking} breaking`,
+    `  ${proposal.summary.needsReview} needs-review`,
+    `  ${proposal.summary.safe} safe`,
+    `  ${proposal.summary.unaffected} unaffected`,
+    `  ${proposal.summary.unresolved} unresolved`,
+    `  ${proposal.summary.indeterminate} indeterminate`,
+  ];
+
+  for (const { key, heading } of PROPOSAL_SEVERITY_SECTIONS) {
+    const items = proposal[key];
+    if (items.length === 0) {
+      continue;
+    }
+    lines.push("", heading);
+    for (const item of items) {
+      formatMigrationProposalItem(item, lines);
+    }
+  }
+
+  if (proposal.review.length > 0) {
+    lines.push("", "Manual Review Required");
+    for (const item of proposal.review) {
+      formatMigrationProposalReviewItem(item, lines);
+    }
+  }
+
+  lines.push("", "No code changes have been applied. This is a read-only report.");
+
+  return lines.join("\n");
+}
+
 function printUsage(): void {
   console.error([
     "Usage:",
@@ -343,6 +425,7 @@ function printUsage(): void {
     "  pnpm guardian inspect <project-path> <dependency>",
     "  pnpm guardian target <project-path> <dependency> <target>",
     "  pnpm guardian impact <project-path> <dependency> <target>",
+    "  pnpm guardian propose <project-path> <dependency> <target> [--json]",
   ].join("\n"));
 }
 
@@ -367,7 +450,15 @@ async function validateProjectPath(projectPath: string): Promise<string> {
 }
 
 async function main(args: string[]): Promise<void> {
-  const [command, projectPath, dependency, target, ...extraArguments] = args;
+  // --json only means something for `propose`; stripping it here (and only when the command is
+  // literally "propose") keeps every other command's strict extra-argument rejection unchanged.
+  const jsonFlagIndex = args[0] === "propose" ? args.indexOf("--json") : -1;
+  const jsonRequested = jsonFlagIndex !== -1;
+  const positionalArgs = jsonFlagIndex === -1
+    ? args
+    : [...args.slice(0, jsonFlagIndex), ...args.slice(jsonFlagIndex + 1)];
+
+  const [command, projectPath, dependency, target, ...extraArguments] = positionalArgs;
   const isScan = command === "scan"
     && projectPath !== undefined
     && dependency === undefined
@@ -384,7 +475,14 @@ async function main(args: string[]): Promise<void> {
     && projectPath !== undefined
     && dependency !== undefined
     && target !== undefined;
-  if ((!isScan && !isInspect && !isTarget && !isImpact) || extraArguments.length > 0) {
+  const isPropose = command === "propose"
+    && projectPath !== undefined
+    && dependency !== undefined
+    && target !== undefined;
+  if (
+    (!isScan && !isInspect && !isTarget && !isImpact && !isPropose)
+    || extraArguments.length > 0
+  ) {
     printUsage();
     process.exitCode = 1;
     return;
@@ -393,7 +491,7 @@ async function main(args: string[]): Promise<void> {
   try {
     const absolutePath = await validateProjectPath(projectPath);
     const result = await scanProject(absolutePath);
-    if (isInspect || isTarget || isImpact) {
+    if (isInspect || isTarget || isImpact || isPropose) {
       const context = findDependencyContext(buildDependencyContexts(result), dependency);
       if (context === undefined) {
         throw new Error(`Dependency "${dependency}" is not declared by this project.`);
@@ -434,6 +532,44 @@ async function main(args: string[]): Promise<void> {
           const classification = classifyUsageImpact(usageImpact);
           console.log(formatImpactClassification(classification, usageImpact.summary));
           if (classification.summary.breaking > 0) {
+            process.exitCode = 1;
+          }
+        } finally {
+          if (pair !== undefined) {
+            await cleanupDependencyArtifactPair(pair);
+          }
+        }
+      } else if (isPropose) {
+        const targetResolution = await resolveDependencyTarget(context, target);
+        if (targetResolution.status !== "resolved") {
+          console.log(formatTargetResolution(targetResolution));
+          process.exitCode = 1;
+          return;
+        }
+        if (context.resolution.status !== "resolved") {
+          const issue = context.resolution.issue === undefined ? "" : ` (${context.resolution.issue})`;
+          console.error(
+            `Guardian: Cannot build a migration proposal for "${dependency}": the installed `
+            + `version could not be resolved from the lockfile (status: `
+            + `${context.resolution.status}${issue}).`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        let pair: AcquiredDependencyArtifactPair | undefined;
+        try {
+          pair = await acquireDependencyArtifactPair(context, targetResolution);
+          const [beforeSurface, afterSurface] = await Promise.all([
+            extractDeclarationSurface(pair.installed),
+            extractDeclarationSurface(pair.target),
+          ]);
+          const diff = compareDeclarationSurfaces(beforeSurface, afterSurface);
+          const usageImpact = correlateUsageImpact(context, beforeSurface, diff);
+          const classification = classifyUsageImpact(usageImpact);
+          const proposal = buildMigrationProposal(classification);
+          console.log(jsonRequested ? JSON.stringify(proposal, null, 2) : formatMigrationProposal(proposal));
+          if (proposal.summary.breaking > 0) {
             process.exitCode = 1;
           }
         } finally {
