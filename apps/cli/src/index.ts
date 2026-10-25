@@ -35,6 +35,11 @@ import {
   type VersionBumpBlockingReason,
 } from "@guardian/project-scanner";
 
+import {
+  defaultGitDeliveryDependencies,
+  deliverVersionBumpAsPullRequest,
+} from "./git-delivery.js";
+
 const VERSION = "0.0.1";
 
 function pluralize(count: number, singular: string, plural = `${singular}s`): string {
@@ -439,6 +444,7 @@ function printUsage(): void {
     "  pnpm guardian impact <project-path> <dependency> <target>",
     "  pnpm guardian propose <project-path> <dependency> <target> [--json]",
     "  pnpm guardian apply <project-path> <dependency> <target> [--yes]",
+    "  pnpm guardian ship <project-path> <dependency> <target> [--yes]",
   ].join("\n"));
 }
 
@@ -471,13 +477,13 @@ function extractFlag(args: readonly string[], flag: string): { present: boolean;
 }
 
 async function main(args: string[]): Promise<void> {
-  // --json/--yes only mean something for `propose`/`apply` respectively; stripping each one here
-  // (and only when the command literally matches) keeps every other command's strict
-  // extra-argument rejection unchanged.
+  // --json only means something for `propose`; --yes means something for both `apply` and
+  // `ship`. Stripping each one here (and only when the command literally matches) keeps every
+  // other command's strict extra-argument rejection unchanged.
   const { present: jsonRequested, rest: afterJson } = args[0] === "propose"
     ? extractFlag(args, "--json")
     : { present: false, rest: args };
-  const { present: applyRequested, rest: positionalArgs } = args[0] === "apply"
+  const { present: yesRequested, rest: positionalArgs } = args[0] === "apply" || args[0] === "ship"
     ? extractFlag(afterJson, "--yes")
     : { present: false, rest: afterJson };
 
@@ -506,8 +512,12 @@ async function main(args: string[]): Promise<void> {
     && projectPath !== undefined
     && dependency !== undefined
     && target !== undefined;
+  const isShip = command === "ship"
+    && projectPath !== undefined
+    && dependency !== undefined
+    && target !== undefined;
   if (
-    (!isScan && !isInspect && !isTarget && !isImpact && !isPropose && !isApply)
+    (!isScan && !isInspect && !isTarget && !isImpact && !isPropose && !isApply && !isShip)
     || extraArguments.length > 0
   ) {
     printUsage();
@@ -518,7 +528,7 @@ async function main(args: string[]): Promise<void> {
   try {
     const absolutePath = await validateProjectPath(projectPath);
     const result = await scanProject(absolutePath);
-    if (isInspect || isTarget || isImpact || isPropose || isApply) {
+    if (isInspect || isTarget || isImpact || isPropose || isApply || isShip) {
       const context = findDependencyContext(buildDependencyContexts(result), dependency);
       if (context === undefined) {
         throw new Error(`Dependency "${dependency}" is not declared by this project.`);
@@ -662,7 +672,7 @@ async function main(args: string[]): Promise<void> {
           return;
         }
 
-        if (!applyRequested) {
+        if (!yesRequested) {
           console.log([
             "Eligible for automatic version bump.",
             "",
@@ -703,6 +713,113 @@ async function main(args: string[]): Promise<void> {
           "",
           "Change",
           `  ${writeResult.previousDeclaredVersion} -> ${writeResult.newDeclaredVersion}`,
+        ].join("\n"));
+      } else if (isShip) {
+        // Deliberately duplicates isApply's pipeline+eligibility+composition block rather than
+        // factoring it out -- the same tradeoff M11 already made for isPropose/isImpact (keep
+        // existing commands untouched rather than refactor them to share code with a new one),
+        // documented here again rather than silently repeated.
+        const targetResolution = await resolveDependencyTarget(context, target);
+        if (targetResolution.status !== "resolved") {
+          console.log(formatTargetResolution(targetResolution));
+          process.exitCode = 1;
+          return;
+        }
+        if (context.resolution.status !== "resolved") {
+          const issue = context.resolution.issue === undefined ? "" : ` (${context.resolution.issue})`;
+          console.error(
+            `Guardian: Cannot evaluate a version bump for "${dependency}": the installed `
+            + `version could not be resolved from the lockfile (status: `
+            + `${context.resolution.status}${issue}).`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        let pair: AcquiredDependencyArtifactPair | undefined;
+        let proposal: MigrationProposal;
+        try {
+          pair = await acquireDependencyArtifactPair(context, targetResolution);
+          const [beforeSurface, afterSurface] = await Promise.all([
+            extractDeclarationSurface(pair.installed),
+            extractDeclarationSurface(pair.target),
+          ]);
+          const diff = compareDeclarationSurfaces(beforeSurface, afterSurface);
+          const usageImpact = correlateUsageImpact(context, beforeSurface, diff);
+          const classification = classifyUsageImpact(usageImpact);
+          proposal = buildMigrationProposal(classification);
+        } finally {
+          if (pair !== undefined) {
+            await cleanupDependencyArtifactPair(pair);
+          }
+        }
+
+        const eligibility = checkVersionBumpEligibility(proposal.summary);
+        if (!eligibility.eligible) {
+          console.log([
+            "Not eligible for automatic version bump:",
+            ...eligibility.blockingReasons.map((reason) =>
+              `  - ${reason} (${BLOCKING_REASON_COUNT[reason](proposal.summary)})`),
+          ].join("\n"));
+          process.exitCode = 1;
+          return;
+        }
+
+        const declaredVersion = context.declaration.declaredVersion;
+        const composed = composeVersionBump(declaredVersion, targetResolution.resolvedVersion);
+        if ("error" in composed) {
+          console.error(
+            `Guardian: Cannot compose a new declared version for "${dependency}": ${composed.error} `
+            + `(declared "${declaredVersion}" is not a plain exact/^/~ semver range).`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        if (!yesRequested) {
+          console.log([
+            "Eligible for automatic version bump via pull request.",
+            "",
+            "Dependency",
+            `  ${dependency}`,
+            "",
+            "Change",
+            `  ${declaredVersion} -> ${composed.newDeclaredVersion}`,
+            "",
+            "Re-run with --yes to create the branch, commit, push, and open the PR.",
+          ].join("\n"));
+          return;
+        }
+
+        const deliveryResult = await deliverVersionBumpAsPullRequest(
+          absolutePath,
+          dependency,
+          context.declaration.type,
+          declaredVersion,
+          composed.newDeclaredVersion,
+          proposal.summary,
+          defaultGitDeliveryDependencies,
+        );
+        if ("code" in deliveryResult) {
+          console.error([
+            `Guardian: Could not open a pull request for "${dependency}".`,
+            `  code    ${deliveryResult.code}`,
+            `  step    ${deliveryResult.step}`,
+            `  message ${deliveryResult.message}`,
+          ].join("\n"));
+          process.exitCode = 1;
+          return;
+        }
+
+        console.log([
+          "Opened pull request.",
+          "",
+          "Branch",
+          `  ${deliveryResult.branch}`,
+          "",
+          "Pull request",
+          `  ${deliveryResult.prUrl}`,
+          ...(deliveryResult.warning === undefined ? [] : ["", "Warning", `  ${deliveryResult.warning}`]),
         ].join("\n"));
       } else {
         console.log(formatDependencyContext(context));
