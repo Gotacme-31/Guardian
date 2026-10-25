@@ -1,0 +1,32 @@
+# Carpetas pesadas o generadas que no aportan al grafo
+node_modules/
+dist/
+build/
+out/
+.next/
+.nuxt/
+.expo/
+.turbo/
+.vercel/
+coverage/
+vendor/
+ios/Pods/
+android/build/
+graphify-out/
+
+# Archivos generados / minificados
+*.min.js
+*.map
+*.lock
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Docs, PDFs e imágenes pasan por el LLM (cuestan tokens).
+# Quita estas líneas solo si quieres que entren al grafo.
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp

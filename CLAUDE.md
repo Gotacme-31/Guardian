@@ -128,3 +128,27 @@ See `README.md`'s "Current Limitations" section for the full, precise list of wh
 - Scanner or resolution behavior changes often require coordinated updates to
   `test-projects/sample-typescript-app` or `test-projects/sample-pnpm-workspace` and their
   assertions.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- When graphify-out/graph.json exists, run `graphify query "<question>"` before your first grep, search or source-file read for a codebase question, and put this rule in every subagent prompt that explores code. Read raw files only for lines the graph or an earlier read already located. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+- A committed graphify-out/graph.json is rewritten whole on every build, so a large diff to it in a pull request is expected. Do not flag it as churn or suggest skipping the graph rebuild or its hooks.
+
+<!-- kit-tokens:start -->
+## Reglas de trabajo (ahorro de tokens)
+
+- El grafo se actualiza solo (hooks al final de cada turno y en cada commit). No ejecutes `graphify update` a mano salvo que el usuario lo pida.
+- Si el prompt trae rutas y el cambio exacto, ve directo a esos archivos: no explores el repo.
+- Edita con cambios puntuales; no reescribas archivos completos.
+- No vuelvas a leer un archivo que ya leíste si no ha cambiado.
+- Para logs o salidas largas, usa `tail`/`grep` y quédate con las líneas relevantes.
+- Respuestas breves: sin introducciones, sin resumir lo que hiciste paso a paso.
+- Termina cuando la tarea esté hecha; no propongas mejoras extra sin que se pidan.
+- Las instrucciones del usuario tienen prioridad sobre este archivo.
+<!-- kit-tokens:end -->
