@@ -1,6 +1,6 @@
 # Guardian
 
-Guardian is a local tool for understanding how software projects depend on external packages. Its long-term direction is to assess dependency updates, identify breaking API changes, measure their real impact, verify migrations, and eventually support automated pull requests.
+Guardian is a local, deterministic tool for understanding how software projects depend on external packages. It assesses dependency updates, identifies breaking API changes, measures their real impact (`impact`), proposes a migration (`propose`), applies a safe version bump (`apply`), and opens the pull request for it (`ship`) — all read-only or explicitly authorized, and never using AI to decide what changed or what to write.
 
 > Guardian is currently an experimental prototype.
 
@@ -303,6 +303,24 @@ guess. The heuristic is deliberately not implemented; it may still have value fo
 merges an invocable function (not just a value) with a namespace under one name, but that is
 unverified, not something demonstrated by this investigation.
 
+## Migration proposal, version bump, and PR delivery (`propose`, `apply`, `ship`)
+
+These three commands build on `impact`'s classification to go from "here's what breaks" to "here's the fix, reviewed as a normal PR" — without ever using AI and without ever guessing at a code change.
+
+```bash
+pnpm guardian propose ./my-project axios 1.6.0
+pnpm guardian apply ./my-project axios 1.6.0 --yes
+pnpm guardian ship ./my-project axios 1.6.0 --yes
+```
+
+`propose` runs the same pipeline as `impact`, then builds a read-only `MigrationProposal`: a plain-language description of each classified change (breaking, needs-review, or safe) alongside the evidence it was classified from. It makes no changes to any file.
+
+`apply` only ever performs one kind of change: a mechanical, provably-safe bump of the dependency's declared version range in `package.json`. It is blocked — and reports every applicable reason it's blocked — whenever the proposal contains anything other than safe/unaffected changes, when the file's current declared version no longer matches what was scanned, or when the version range can't be unambiguously composed. It requires `--yes` and never bumps a version it can't prove is safe.
+
+`ship` runs `apply`'s bump and then delivers it as a pull request: creates a branch, commits only the single changed line in `package.json`, pushes, and opens the PR with the full impact summary in its description as evidence — using your own already-authenticated `git`/`gh` session. It never pushes directly to your default branch, and any failure after a mutation (for example the branch was created but the push failed) is reported with the exact command to undo it by hand; `ship` never attempts to auto-reverse a partial failure.
+
+None of `propose`, `apply`, or `ship` call any AI model or external service beyond the public npm registry and your own already-configured `git` remote. A future hosted version of Guardian (a separate, paid product) adds AI-assisted patch generation for the `needs-review`/`breaking` cases that `apply`/`ship` intentionally refuse to touch; it does not change anything described in this README.
+
 ## Tests
 
 ```bash
@@ -404,7 +422,7 @@ If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exist
 - M9 treats `export-added`/`member-added` as a defensive, effectively unreachable case under the normal M6→M7→M8→M9 pipeline (an M8 leaf can only exist for a declaration already present on the *before* side, which M7 never reports as "added"); it is classified as `needs-review` with reason `unexpected-change-type` rather than assumed impossible, in case that pipeline invariant is ever violated by a caller.
 - M9 does not add risk scoring, upgrade recommendations, or migration-patch generation; it only reports the structural reason behind each verdict.
 - `impact` takes exactly the same three positional arguments as `target` (project path, dependency, target); it adds no new CLI flags or options.
-- `impact` never authorizes, applies, or generates a migration for any change; it only reports. Deciding to upgrade, applying a codemod, or opening a pull request are not in scope for this or any earlier milestone.
+- `impact` itself never authorizes, applies, or generates a migration for any change; it only reports. Deciding to upgrade and applying a codemod are not in scope for `impact`. (Opening a pull request for a safe version bump is in scope for the separate `propose`/`apply`/`ship` commands below — `impact` does not do this itself.)
 - If the installed version cannot be resolved from the lockfile (`context.resolution.status !== "resolved"`), `impact` reports that explicitly and exits before attempting any artifact acquisition, rather than surfacing `acquireDependencyArtifactPair`'s own lower-level `PackageArtifactError`.
 - `impact`'s exit code reflects only `classification.summary.breaking > 0`; a needs-review-only or fully indeterminate result exits 0, matching every other command's convention of a nonzero exit only for a clear failure condition, not for "worth a second look."
 - `impact` and `correlateUsageImpact` check every `DeclarationEntrypoint` sharing an `exportPath`
@@ -413,3 +431,8 @@ If more than one of `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` exist
   interop entrypoint) can mark a usage `indeterminate` even when the specific entrypoint variant a
   consuming project's real module resolution would select is unambiguous. Guardian does not yet
   determine which entrypoint variant a project's actual resolution settings would pick.
+
+
+## License
+
+Guardian is source-available under the [PolyForm Shield License 1.0.0](./LICENSE) — free to use, read, and modify, including commercially, with one restriction: you may not use it to build a product or service that competes with Guardian. See [`LICENSE`](./LICENSE) for the exact terms.
